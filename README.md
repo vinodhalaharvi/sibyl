@@ -21,20 +21,23 @@ top of it.
 
 ```
 sibyl/
-├── agent/                    package agent — workflow, activities, types
+├── agent/                    package agent — workflows, activities, types
 │   ├── types.go              Question, Answer, Verdict, Round
 │   ├── llm.go                CompleteFunc seam + Middleware + ScriptedLLM
 │   ├── lift.go               bridge between weft Arrows and Temporal activities
 │   ├── activities.go         Researcher and Critic — composed weft pipelines
-│   ├── workflow.go           ConvergeWorkflow — the durable loop
+│   ├── workflow.go           ConvergeWorkflow — the single-question convergence loop
+│   ├── decompose.go          deterministic decompose + synthesize pipelines
+│   ├── supervisor.go         SupervisorWorkflow — fan-out coordinator
 │   ├── anthropic.go          Anthropic API client (CompleteFunc)
 │   ├── claudecode.go         Local Claude Code CLI client (CompleteFunc)
-│   └── *_test.go             unit tests (42 tests, in-process Temporal)
+│   └── *_test.go             unit tests (60 tests, in-process Temporal)
 ├── worker/
 │   └── worker.go             Register() helper to wire Sibyl onto a Temporal worker
 ├── cmd/
 │   ├── worker/main.go        runnable worker (-llm scripted | anthropic | claude-code)
-│   └── ask/main.go           CLI to submit one question and print the answer
+│   ├── ask/main.go           submit a single ConvergeWorkflow
+│   └── ask-supervisor/main.go  submit a SupervisorWorkflow (multi-agent fan-out)
 ├── go.mod / go.sum
 ├── Makefile
 └── README.md
@@ -156,6 +159,57 @@ The convergence loop itself remains a Temporal workflow (must be deterministic
 for replay), but the work *inside* each round is now expressible in the
 broader weft algebra. This is the seam you'd build a multi-agent supervisor
 on top of.
+
+## Multi-agent supervision
+
+`SupervisorWorkflow` decomposes a question into subquestions, spawns a child
+`ConvergeWorkflow` per subquestion in parallel, waits for all of them, and
+synthesizes a final answer.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ SupervisorWorkflow                                           │
+│                                                              │
+│  1. Decompose activity        question -> []SubQuestion      │
+│  2. for each SubQuestion:                                    │
+│       ExecuteChildWorkflow(ConvergeWorkflow, ...)            │
+│  3. Wait for all children (swallow individual failures)      │
+│  4. Synthesize activity       []SubAnswer -> final string    │
+└──────────────────────────────────────────────────────────────┘
+         │                  │                  │
+         ▼                  ▼                  ▼
+   ConvergeWorkflow   ConvergeWorkflow   ConvergeWorkflow
+   (subquestion 1)    (subquestion 2)    (subquestion N)
+```
+
+Run it:
+
+```bash
+make ask-supervisor Q="What is Go and how does it compare to Rust"
+```
+
+Or directly:
+
+```bash
+go run ./cmd/ask-supervisor -q "Postgres vs SQLite vs MySQL for a side project" -rounds 3
+```
+
+Each child workflow appears in the Web UI as a separate execution with a
+deterministic ID (`<supervisor-id>-sub-<index>`), so you can drill into any
+child's event history independently.
+
+**Failure handling.** Individual child failures are recorded in the output
+(`SubAnswer.Error`) but don't fail the supervisor. The supervisor only fails
+if every child failed, or if decomposition or synthesis itself failed.
+
+**Decomposer.** Sibyl ships a deterministic heuristic decomposer that splits
+on `?`, `and`, `vs`, `versus`, `compared to`, `;`. It's pure code, no LLM call,
+no flakiness. Swap it for an LLM-backed decomposer by replacing
+`decomposeArrow` in `agent/decompose.go` — it's a single `weft.Arrow`.
+
+**Synthesizer.** Same story: the default synthesizer concatenates child
+answers with markdown headings. Replace `synthesizeArrow` for LLM-backed
+summarization.
 
 ## How the convergence loop works
 
