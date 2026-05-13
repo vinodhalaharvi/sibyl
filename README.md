@@ -60,34 +60,66 @@ go run ./cmd/ask -q "What is the capital of France?" -rounds 3
 # Open http://localhost:8080 to watch the workflow execute live.
 ```
 
-The bundled `cmd/worker` uses a **ScriptedLLM** — a deterministic, in-memory
-"model" that returns canned responses. This lets you run the whole stack
-end-to-end without API keys. To go live, implement the `agent.LLMClient`
-interface against your provider and swap it into `cmd/worker/main.go`.
+The bundled `cmd/worker` uses a **ScriptedLLM** by default — a deterministic,
+in-memory "model" that returns canned responses. This lets you run the whole
+stack end-to-end without API keys. To use a real LLM, pass `-llm`:
 
-## The LLMClient interface
+```bash
+# Use the Anthropic API (requires ANTHROPIC_API_KEY)
+go run ./cmd/worker -llm anthropic
 
-```go
-type LLMClient interface {
-    Complete(ctx context.Context, systemPrompt, userMessage string) (string, error)
-}
+# Use your local Claude Code CLI (uses your Pro/Max subscription auth)
+go run ./cmd/worker -llm claude-code
+
+# Default: scripted, no network, no auth
+go run ./cmd/worker -llm scripted
 ```
 
-A real implementation looks like:
+## The CompleteFunc seam
+
+The LLM boundary is a **function type**, not an interface:
 
 ```go
-type AnthropicClient struct{ apiKey string }
-
-func (a *AnthropicClient) Complete(ctx context.Context, sys, user string) (string, error) {
-    // POST to https://api.anthropic.com/v1/messages, return the assistant's text
-    // ...
-}
+type CompleteFunc func(ctx context.Context, systemPrompt, userMessage string) (string, error)
 ```
 
-Pass it to `worker.Register`:
+A function type is the right tool for a single-method seam in Go: any
+compatible method becomes a `CompleteFunc` via a method value, test doubles
+can be plain closures, and middleware composes as ordinary function wrapping.
+
+Three backends ship in the box:
+
+| Type | Use it for | How |
+|---|---|---|
+| `ScriptedLLM` | unit tests / offline demos | canned responses, records calls |
+| `AnthropicClient` | production / billed API | direct HTTP to `api.anthropic.com` |
+| `ClaudeCodeClient` | running on your machine | shells out to `claude -p` |
+
+Each exposes a `Complete` method that satisfies `CompleteFunc`:
 
 ```go
-sibylworker.Register(w, &AnthropicClient{apiKey: os.Getenv("ANTHROPIC_API_KEY")})
+c, _ := agent.NewAnthropicClient(agent.AnthropicConfig{})
+sibylworker.Register(w, c.Complete)   // method value -> CompleteFunc
+```
+
+### Middleware
+
+Because `CompleteFunc` is a function type, wrapping it is trivial:
+
+```go
+func WithLogging(log *slog.Logger) agent.Middleware {
+    return func(next agent.CompleteFunc) agent.CompleteFunc {
+        return func(ctx context.Context, sys, user string) (string, error) {
+            start := time.Now()
+            out, err := next(ctx, sys, user)
+            log.Info("llm call", "took", time.Since(start), "err", err)
+            return out, err
+        }
+    }
+}
+
+complete := agent.Chain(rawClient.Complete, WithLogging(logger), WithRateLimit(...))
+sibylworker.Register(w, complete)
 ```
 
 ## How the convergence loop works
