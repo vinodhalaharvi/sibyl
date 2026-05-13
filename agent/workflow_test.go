@@ -11,16 +11,16 @@ import (
 	"github.com/vinodhalaharvi/sibyl/agent"
 )
 
-// newTestEnv builds a Temporal test environment with the given LLM client and
-// registers the workflow + activities, mirroring what the worker package does.
-func newTestEnv(t *testing.T, llm agent.LLMClient) *testsuite.TestWorkflowEnvironment {
+// newTestEnv builds a Temporal test environment with the given CompleteFunc
+// and registers the workflow + activities, mirroring what the worker package does.
+func newTestEnv(t *testing.T, complete agent.CompleteFunc) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
 
 	env.RegisterWorkflow(agent.ConvergeWorkflow)
 
-	acts := &agent.Activities{LLM: llm}
+	acts := &agent.Activities{Complete: complete}
 	env.RegisterActivityWithOptions(acts.Research, registerOpts(agent.ResearchActivityName))
 	env.RegisterActivityWithOptions(acts.Critique, registerOpts(agent.CritiqueActivityName))
 
@@ -35,7 +35,7 @@ func TestConvergeWorkflow_ConvergesOnFirstRound(t *testing.T) {
 		`{"approved": true, "confidence": 0.95, "feedback": ""}`,
 	}}
 
-	env := newTestEnv(t, llm)
+	env := newTestEnv(t, llm.Complete)
 	env.ExecuteWorkflow(agent.ConvergeWorkflow, agent.Question{
 		Text:      "What is the capital of France?",
 		MaxRounds: 5,
@@ -64,7 +64,7 @@ func TestConvergeWorkflow_ConvergesAfterRevision(t *testing.T) {
 		`{"approved": true, "confidence": 0.9, "feedback": ""}`,
 	}}
 
-	env := newTestEnv(t, llm)
+	env := newTestEnv(t, llm.Complete)
 	env.ExecuteWorkflow(agent.ConvergeWorkflow, agent.Question{
 		Text:      "What is the capital of France?",
 		MaxRounds: 5,
@@ -94,7 +94,7 @@ func TestConvergeWorkflow_HitsMaxRoundsWithoutConverging(t *testing.T) {
 		`{"approved": false, "confidence": 0.2, "feedback": "Not good enough."}`,
 	}}
 
-	env := newTestEnv(t, llm)
+	env := newTestEnv(t, llm.Complete)
 	env.ExecuteWorkflow(agent.ConvergeWorkflow, agent.Question{
 		Text:      "Hard question",
 		MaxRounds: 3,
@@ -113,7 +113,7 @@ func TestConvergeWorkflow_HitsMaxRoundsWithoutConverging(t *testing.T) {
 }
 
 func TestConvergeWorkflow_RejectsEmptyQuestion(t *testing.T) {
-	env := newTestEnv(t, &agent.ScriptedLLM{})
+	env := newTestEnv(t, (&agent.ScriptedLLM{}).Complete)
 	env.ExecuteWorkflow(agent.ConvergeWorkflow, agent.Question{
 		Text:      "",
 		MaxRounds: 3,
@@ -126,7 +126,7 @@ func TestConvergeWorkflow_RejectsEmptyQuestion(t *testing.T) {
 }
 
 func TestConvergeWorkflow_RejectsZeroMaxRounds(t *testing.T) {
-	env := newTestEnv(t, &agent.ScriptedLLM{})
+	env := newTestEnv(t, (&agent.ScriptedLLM{}).Complete)
 	env.ExecuteWorkflow(agent.ConvergeWorkflow, agent.Question{
 		Text:      "Anything",
 		MaxRounds: 0,
@@ -145,7 +145,7 @@ func TestConvergeWorkflow_MalformedCriticJSONFailsFast(t *testing.T) {
 		"this is not json at all",
 	}}
 
-	env := newTestEnv(t, llm)
+	env := newTestEnv(t, llm.Complete)
 	env.ExecuteWorkflow(agent.ConvergeWorkflow, agent.Question{
 		Text:      "Q",
 		MaxRounds: 3,

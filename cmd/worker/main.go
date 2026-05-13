@@ -3,7 +3,7 @@
 //
 // In its default form it uses a ScriptedLLM so you can run end-to-end
 // against a local Temporal dev server without any API keys. Swap in a
-// real LLM client in main() to go live.
+// real CompleteFunc in main() to go live.
 package main
 
 import (
@@ -24,7 +24,7 @@ func main() {
 	defer c.Close()
 
 	// Demo LLM: a scripted client that converges in two rounds.
-	// Replace with a real LLMClient implementation for production use.
+	// Replace with a real CompleteFunc for production use.
 	demoLLM := &agent.ScriptedLLM{
 		Cycle: true,
 		Responses: []string{
@@ -40,7 +40,7 @@ func main() {
 	}
 
 	w := worker.New(c, agent.TaskQueue, worker.Options{})
-	sibylworker.Register(w, demoLLM)
+	sibylworker.Register(w, demoLLM.Complete)
 
 	log.Println("Sibyl worker started on task queue:", agent.TaskQueue)
 	log.Println("Press Ctrl+C to stop.")

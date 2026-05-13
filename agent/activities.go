@@ -9,10 +9,15 @@ import (
 	"go.temporal.io/sdk/temporal"
 )
 
-// Activities holds the LLM client used by all agent activities. Register an
-// instance with the worker so the methods become Temporal activities.
+// Activities holds the completion function used by all agent activities.
+// Register an instance with the worker so the methods become Temporal
+// activities.
+//
+// Complete is a CompleteFunc — a plain function value. Wire it to any source:
+// a real provider client (`client.Complete`), a Chain of middlewares around
+// one, or a closure for tests.
 type Activities struct {
-	LLM LLMClient
+	Complete CompleteFunc
 }
 
 // ResearchInput is the input to the Research activity.
@@ -28,9 +33,9 @@ type ResearchInput struct {
 // This is an Activity, not workflow code. It can use time.Now, randomness,
 // HTTP calls, etc. Its result is recorded in workflow history.
 func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, error) {
-	if a.LLM == nil {
+	if a.Complete == nil {
 		return "", temporal.NewNonRetryableApplicationError(
-			"Activities.LLM is nil", "ConfigurationError", nil)
+			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
 
 	system := `You are a careful researcher. Answer the user's question concisely (2-4 sentences).
@@ -46,7 +51,7 @@ Return only the answer text, no preamble.`
 		fmt.Fprintf(&user, "\nCritic feedback to address:\n%s\n", in.CriticFeedback)
 	}
 
-	resp, err := a.LLM.Complete(ctx, system, user.String())
+	resp, err := a.Complete(ctx, system, user.String())
 	if err != nil {
 		return "", fmt.Errorf("researcher LLM call failed: %w", err)
 	}
@@ -66,9 +71,9 @@ type CritiqueInput struct {
 // this activity returns a NonRetryable error (retrying won't help — it's a
 // prompt/model problem, not a transient failure).
 func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, error) {
-	if a.LLM == nil {
+	if a.Complete == nil {
 		return Verdict{}, temporal.NewNonRetryableApplicationError(
-			"Activities.LLM is nil", "ConfigurationError", nil)
+			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
 
 	system := `You are a strict critic evaluating an answer to a question.
@@ -81,7 +86,7 @@ Do not include any text outside the JSON object.`
 	user := fmt.Sprintf("Question: %s\n\nAnswer to evaluate (round %d):\n%s",
 		in.Question, in.Round, in.Answer)
 
-	resp, err := a.LLM.Complete(ctx, system, user)
+	resp, err := a.Complete(ctx, system, user)
 	if err != nil {
 		return Verdict{}, fmt.Errorf("critic LLM call failed: %w", err)
 	}
