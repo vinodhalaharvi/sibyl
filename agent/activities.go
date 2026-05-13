@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/vinodhalaharvi/weft/weft"
 	"go.temporal.io/sdk/temporal"
 )
 
@@ -13,9 +14,10 @@ import (
 // Register an instance with the worker so the methods become Temporal
 // activities.
 //
-// Complete is a CompleteFunc — a plain function value. Wire it to any source:
-// a real provider client (`client.Complete`), a Chain of middlewares around
-// one, or a closure for tests.
+// Internally each activity is a composed weft Arrow: build prompt ->
+// call LLM (lifted CompleteFunc) -> parse. This factoring is what lets
+// us add middleware (retry, logging, caching) by composing more arrows
+// without touching the activity entry points themselves.
 type Activities struct {
 	Complete CompleteFunc
 }
@@ -27,18 +29,24 @@ type ResearchInput struct {
 	CriticFeedback string // empty on first round
 }
 
-// Research produces a candidate answer to the question. On subsequent rounds
-// it incorporates the critic's feedback to refine the previous answer.
-//
-// This is an Activity, not workflow code. It can use time.Now, randomness,
-// HTTP calls, etc. Its result is recorded in workflow history.
-func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, error) {
-	if a.Complete == nil {
-		return "", temporal.NewNonRetryableApplicationError(
-			"Activities.Complete is nil", "ConfigurationError", nil)
-	}
+// CritiqueInput is the input to the Critique activity.
+type CritiqueInput struct {
+	Question string
+	Answer   string
+	Round    int
+}
 
-	system := `You are a careful researcher. Answer the user's question concisely (2-4 sentences).
+// --- Researcher pipeline ----------------------------------------------------
+//
+// researcher : Arrow[ResearchInput, string]
+//            = Pipe3(buildResearchRequest, llmArrow, trimArrow)
+//
+// Each stage is independently testable. Composition is the API: to add
+// behavior (caching, logging, rate limiting), wrap one of the stages
+// with weft.Map / weft.PreMap or insert another Arrow in the pipe.
+
+func buildResearchRequest(_ context.Context, in ResearchInput) (CompletionRequest, error) {
+	const system = `You are a careful researcher. Answer the user's question concisely (2-4 sentences).
 If you previously answered and received critic feedback, revise your answer to address it.
 Return only the answer text, no preamble.`
 
@@ -50,33 +58,47 @@ Return only the answer text, no preamble.`
 	if in.CriticFeedback != "" {
 		fmt.Fprintf(&user, "\nCritic feedback to address:\n%s\n", in.CriticFeedback)
 	}
-
-	resp, err := a.Complete(ctx, system, user.String())
-	if err != nil {
-		return "", fmt.Errorf("researcher LLM call failed: %w", err)
-	}
-	return trimResponse(resp), nil
+	return CompletionRequest{SystemPrompt: system, UserMessage: user.String()}, nil
 }
 
-// CritiqueInput is the input to the Critique activity.
-type CritiqueInput struct {
-	Question string
-	Answer   string
-	Round    int
+// makeResearcherArrow composes the Researcher pipeline from a CompleteFunc.
+// Exposed so tests (and curious callers) can exercise the pipeline directly
+// without going through Temporal.
+func makeResearcherArrow(c CompleteFunc) weft.Arrow[ResearchInput, string] {
+	return weft.Pipe3(
+		weft.Arrow[ResearchInput, CompletionRequest](buildResearchRequest),
+		CompleteAsArrow(c),
+		weft.Pure(trimResponse),
+	)
 }
 
-// Critique evaluates a candidate answer and returns a Verdict.
-//
-// The critic is instructed to return JSON. If the model returns malformed JSON,
-// this activity returns a NonRetryable error (retrying won't help — it's a
-// prompt/model problem, not a transient failure).
-func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, error) {
+// Research is the Temporal activity entry point. The body is the composed
+// arrow above; this method exists so worker.RegisterActivity has something
+// reflectable to bind to.
+func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, error) {
 	if a.Complete == nil {
-		return Verdict{}, temporal.NewNonRetryableApplicationError(
+		return "", temporal.NewNonRetryableApplicationError(
 			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
+	out, err := makeResearcherArrow(a.Complete)(ctx, in)
+	if err != nil {
+		return "", fmt.Errorf("researcher pipeline failed: %w", err)
+	}
+	return out, nil
+}
 
-	system := `You are a strict critic evaluating an answer to a question.
+// --- Critic pipeline --------------------------------------------------------
+//
+// critic : Arrow[CritiqueInput, Verdict]
+//        = Pipe3(buildCriticRequest, llmArrow, parseVerdict)
+//
+// parseVerdict is the only stage that can produce a non-retryable error:
+// if the model returns malformed JSON, retrying won't help. We surface
+// that as a temporal.NonRetryableApplicationError so the workflow stops
+// instead of burning cost on retries.
+
+func buildCriticRequest(_ context.Context, in CritiqueInput) (CompletionRequest, error) {
+	const system = `You are a strict critic evaluating an answer to a question.
 Return a single JSON object with these fields:
   - "approved": boolean, true only if the answer is clearly correct and complete
   - "confidence": number between 0.0 and 1.0
@@ -85,20 +107,16 @@ Do not include any text outside the JSON object.`
 
 	user := fmt.Sprintf("Question: %s\n\nAnswer to evaluate (round %d):\n%s",
 		in.Question, in.Round, in.Answer)
+	return CompletionRequest{SystemPrompt: system, UserMessage: user}, nil
+}
 
-	resp, err := a.Complete(ctx, system, user)
-	if err != nil {
-		return Verdict{}, fmt.Errorf("critic LLM call failed: %w", err)
-	}
-
+func parseVerdict(_ context.Context, raw string) (Verdict, error) {
 	var v Verdict
-	if err := json.Unmarshal([]byte(trimResponse(resp)), &v); err != nil {
+	if err := json.Unmarshal([]byte(trimResponse(raw)), &v); err != nil {
 		return Verdict{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("critic returned malformed JSON: %v; raw response: %q", err, resp),
+			fmt.Sprintf("critic returned malformed JSON: %v; raw response: %q", err, raw),
 			"InvalidLLMResponse", nil)
 	}
-
-	// Clamp confidence to a sensible range — defensive against model drift.
 	switch {
 	case v.Confidence < 0:
 		v.Confidence = 0
@@ -106,4 +124,22 @@ Do not include any text outside the JSON object.`
 		v.Confidence = 1
 	}
 	return v, nil
+}
+
+// makeCriticArrow composes the Critic pipeline from a CompleteFunc.
+func makeCriticArrow(c CompleteFunc) weft.Arrow[CritiqueInput, Verdict] {
+	return weft.Pipe3(
+		weft.Arrow[CritiqueInput, CompletionRequest](buildCriticRequest),
+		CompleteAsArrow(c),
+		weft.Arrow[string, Verdict](parseVerdict),
+	)
+}
+
+// Critique is the Temporal activity entry point.
+func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, error) {
+	if a.Complete == nil {
+		return Verdict{}, temporal.NewNonRetryableApplicationError(
+			"Activities.Complete is nil", "ConfigurationError", nil)
+	}
+	return makeCriticArrow(a.Complete)(ctx, in)
 }

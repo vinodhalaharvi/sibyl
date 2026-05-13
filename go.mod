@@ -6,6 +6,7 @@ toolchain go1.24.4
 
 require (
 	github.com/stretchr/testify v1.10.0
+	github.com/vinodhalaharvi/weft v0.1.0
 	go.temporal.io/sdk v1.43.0
 )
 

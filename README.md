@@ -23,16 +23,17 @@ top of it.
 sibyl/
 ├── agent/                    package agent — workflow, activities, types
 │   ├── types.go              Question, Answer, Verdict, Round
-│   ├── llm.go                LLMClient interface + ScriptedLLM (for tests)
-│   ├── activities.go         Researcher and Critic activities
+│   ├── llm.go                CompleteFunc seam + Middleware + ScriptedLLM
+│   ├── lift.go               bridge between weft Arrows and Temporal activities
+│   ├── activities.go         Researcher and Critic — composed weft pipelines
 │   ├── workflow.go           ConvergeWorkflow — the durable loop
-│   ├── workflow_test.go      end-to-end workflow tests
-│   ├── activities_test.go    activity unit tests
-│   └── helpers_test.go       small test helpers
+│   ├── anthropic.go          Anthropic API client (CompleteFunc)
+│   ├── claudecode.go         Local Claude Code CLI client (CompleteFunc)
+│   └── *_test.go             unit tests (42 tests, in-process Temporal)
 ├── worker/
 │   └── worker.go             Register() helper to wire Sibyl onto a Temporal worker
 ├── cmd/
-│   ├── worker/main.go        runnable worker (ships with a ScriptedLLM demo)
+│   ├── worker/main.go        runnable worker (-llm scripted | anthropic | claude-code)
 │   └── ask/main.go           CLI to submit one question and print the answer
 ├── go.mod / go.sum
 ├── Makefile
@@ -121,6 +122,40 @@ func WithLogging(log *slog.Logger) agent.Middleware {
 complete := agent.Chain(rawClient.Complete, WithLogging(logger), WithRateLimit(...))
 sibylworker.Register(w, complete)
 ```
+
+## Composing arrows with weft
+
+Sibyl uses [weft](https://github.com/vinodhalaharvi/weft) as its compositional
+layer. Every step inside an activity — prompt building, LLM call, response
+parsing — is a `weft.Arrow[A, B]`. The activity body is just `Pipe3` over
+three of them:
+
+```go
+// agent/activities.go
+researcher := weft.Pipe3(
+    buildResearchRequest,        // weft.Arrow[ResearchInput, CompletionRequest]
+    agent.CompleteAsArrow(c),    // weft.Arrow[CompletionRequest, string]
+    weft.Pure(trimResponse),     // weft.Arrow[string, string]
+)
+```
+
+Why this matters: as we move toward multi-agent systems, the unit of
+composition is no longer the activity — it's the Arrow. You can add a
+caching layer, swap parsers, or fan out to multiple LLMs in parallel
+(`weft.Par`) without rewriting the activity surface. The activity wrapper
+just dispatches to whichever arrow you've composed.
+
+The `agent` package exposes two adapters (in `lift.go`):
+
+| Adapter              | Direction              | Use it when                                  |
+|----------------------|------------------------|----------------------------------------------|
+| `CompleteAsArrow`    | `CompleteFunc` → Arrow | Lifting an LLM client into a weft pipeline   |
+| `ArrowAsActivity`    | Arrow → activity func  | Registering a composed arrow with Temporal   |
+
+The convergence loop itself remains a Temporal workflow (must be deterministic
+for replay), but the work *inside* each round is now expressible in the
+broader weft algebra. This is the seam you'd build a multi-agent supervisor
+on top of.
 
 ## How the convergence loop works
 
