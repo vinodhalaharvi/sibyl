@@ -1,0 +1,20 @@
+# Compiled binaries
+/sibyl-worker
+/sibyl-ask
+/bin/
+
+# Temporal dev server local DB
+*.db
+*.db-*
+temporal.db
+
+# Go build artifacts
+*.test
+*.out
+coverage.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
