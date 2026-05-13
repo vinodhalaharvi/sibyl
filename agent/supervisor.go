@@ -47,9 +47,17 @@ type DecomposeInput struct {
 }
 
 // Synthesize is the Temporal activity entry point for the synthesizer.
-// Dispatches to synthesizeArrow.
+// If a.Synthesizer is set (via Activities.Synthesizer field assignment
+// or worker.RegisterWithOptions), that arrow is used; otherwise the
+// default heuristic concatenator runs. This makes "use an LLM for
+// synthesis" a one-line swap at registration time without touching the
+// workflow.
 func (a *Activities) Synthesize(ctx context.Context, in []SubAnswer) (string, error) {
-	return synthesizeArrow(ctx, in)
+	syn := a.Synthesizer
+	if syn == nil {
+		syn = synthesizeArrow
+	}
+	return syn(ctx, in)
 }
 
 // SupervisorWorkflow decomposes the input question, fans out child

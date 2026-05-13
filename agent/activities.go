@@ -10,16 +10,21 @@ import (
 	"go.temporal.io/sdk/temporal"
 )
 
-// Activities holds the completion function used by all agent activities.
-// Register an instance with the worker so the methods become Temporal
-// activities.
+// Activities holds the completion function and overrideable arrows used by
+// the Temporal activities. Register an instance with the worker so the
+// methods become Temporal activities.
 //
 // Internally each activity is a composed weft Arrow: build prompt ->
 // call LLM (lifted CompleteFunc) -> parse. This factoring is what lets
 // us add middleware (retry, logging, caching) by composing more arrows
 // without touching the activity entry points themselves.
 type Activities struct {
+	// Complete backs the Researcher and Critic activities.
 	Complete CompleteFunc
+	// Synthesizer, if set, replaces the default heuristic synthesizer
+	// in Activities.Synthesize. Use agent.LLMSynthesizer(complete) to
+	// get an LLM-backed one, or roll your own weft.Arrow.
+	Synthesizer weft.Arrow[[]SubAnswer, string]
 }
 
 // ResearchInput is the input to the Research activity.

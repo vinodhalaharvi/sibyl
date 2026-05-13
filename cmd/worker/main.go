@@ -6,6 +6,11 @@
 //	scripted    (default) deterministic canned responses; no network, no keys
 //	anthropic   Anthropic Messages API; requires ANTHROPIC_API_KEY
 //	claude-code shell out to local `claude -p`; uses your Claude Code login
+//
+// Synthesis strategy via -synthesize:
+//
+//	heuristic   (default) concatenate child answers with markdown headings
+//	llm         use the same LLM backend to summarize children into one answer
 package main
 
 import (
@@ -22,6 +27,7 @@ import (
 func main() {
 	backend := flag.String("llm", "scripted", "completion backend: scripted | anthropic | claude-code")
 	model := flag.String("model", "", "model name (passes through to backend if set)")
+	synthesize := flag.String("synthesize", "heuristic", "synthesis strategy: heuristic | llm")
 	flag.Parse()
 
 	complete, err := pickBackend(*backend, *model)
@@ -29,6 +35,7 @@ func main() {
 		log.Fatalln("backend setup failed:", err)
 	}
 	log.Printf("Sibyl worker using LLM backend: %s", *backend)
+	log.Printf("Sibyl worker using synthesis strategy: %s", *synthesize)
 
 	c, err := client.Dial(client.Options{})
 	if err != nil {
@@ -36,8 +43,18 @@ func main() {
 	}
 	defer c.Close()
 
+	opts := sibylworker.Options{}
+	switch *synthesize {
+	case "heuristic", "":
+		// Default; leave Options.Synthesizer nil.
+	case "llm":
+		opts.Synthesizer = agent.LLMSynthesizer(complete)
+	default:
+		log.Fatalf("unknown -synthesize value: %q (choices: heuristic, llm)", *synthesize)
+	}
+
 	w := worker.New(c, agent.TaskQueue, worker.Options{})
-	sibylworker.Register(w, complete)
+	sibylworker.RegisterWithOptions(w, complete, opts)
 
 	log.Println("Sibyl worker started on task queue:", agent.TaskQueue)
 	log.Println("Press Ctrl+C to stop.")
