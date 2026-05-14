@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/vinodhalaharvi/weft/weft"
 )
@@ -348,12 +349,23 @@ func (c *CompiledDAG) Execute(ctx context.Context, seed map[NodeID]any) (map[Nod
 				}
 				mu.Unlock()
 
+				// Emit lifecycle events around the node's arrow invocation.
+				// Events are best-effort: a no-op emitter is fine.
+				emitter := EmitterFromContext(layerCtx)
+				nodeStart := time.Now()
+				emitter.Emit(NewNodeStarted("", string(n.ID), string(n.ID)))
+
 				out, err := n.Arrow(layerCtx, inputs)
+				dur := time.Since(nodeStart)
+
 				if err != nil {
+					emitter.Emit(NewNodeFailed("", string(n.ID), string(n.ID), err, dur))
 					errCh <- &NodeError{NodeID: n.ID, Err: err}
 					cancelLayer()
 					return
 				}
+				emitter.Emit(NewNodeCompleted("", string(n.ID), string(n.ID), out, dur))
+
 				mu.Lock()
 				results[n.ID] = out
 				mu.Unlock()

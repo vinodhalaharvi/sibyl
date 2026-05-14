@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/vinodhalaharvi/weft/weft"
 	"go.temporal.io/sdk/temporal"
@@ -89,7 +90,13 @@ func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, er
 		return "", temporal.NewNonRetryableApplicationError(
 			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
+	emitter := EmitterFromContext(ctx)
+	start := time.Now()
+	emitter.Emit(NewActivityStarted("", ResearchActivityName, ""))
+
 	out, err := makeResearcherArrow(a.Complete)(ctx, in)
+
+	emitter.Emit(NewActivityCompleted("", ResearchActivityName, "", err, time.Since(start)))
 	if err != nil {
 		return "", fmt.Errorf("researcher pipeline failed: %w", err)
 	}
@@ -150,5 +157,12 @@ func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, e
 		return Verdict{}, temporal.NewNonRetryableApplicationError(
 			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
-	return makeCriticArrow(a.Complete)(ctx, in)
+	emitter := EmitterFromContext(ctx)
+	start := time.Now()
+	emitter.Emit(NewActivityStarted("", CritiqueActivityName, ""))
+
+	v, err := makeCriticArrow(a.Complete)(ctx, in)
+
+	emitter.Emit(NewActivityCompleted("", CritiqueActivityName, "", err, time.Since(start)))
+	return v, err
 }

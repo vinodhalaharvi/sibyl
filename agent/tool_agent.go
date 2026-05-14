@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 )
@@ -150,22 +151,31 @@ func runToolAgentLoop(
 					fmt.Sprintf("tool agent step %d: action=tool but no tool name given", step+1),
 					"InvalidLLMResponse", nil)
 			}
+
+			emitter := EmitterFromContext(ctx)
+			emitter.Emit(NewToolCalled("", toolName, decision.Args, step+1))
+			toolStart := time.Now()
+
 			tool, ok := tools.Get(toolName)
 			if !ok {
 				// The LLM picked a non-existent tool. Treat as a soft
 				// error: append a synthetic tool result that tells the
 				// LLM the tool doesn't exist, so it can recover.
+				msg := fmt.Sprintf("Error: tool %q is not registered. Available tools: %s.",
+					toolName, strings.Join(tools.Names(), ", "))
+				emitter.Emit(NewToolCompleted("", toolName, step+1, "", errors.New(msg), time.Since(toolStart)))
 				history = append(history, ToolAgentStep{
-					Reasoning: decision.Reasoning,
-					ToolName:  toolName,
-					ToolArgs:  decision.Args,
-					ToolResult: fmt.Sprintf("Error: tool %q is not registered. Available tools: %s.",
-						toolName, strings.Join(tools.Names(), ", ")),
-					ToolError: true,
+					Reasoning:  decision.Reasoning,
+					ToolName:   toolName,
+					ToolArgs:   decision.Args,
+					ToolResult: msg,
+					ToolError:  true,
 				})
 				continue
 			}
 			result, runErr := tool.Run(ctx, decision.Args)
+			emitter.Emit(NewToolCompleted("", toolName, step+1, result, runErr, time.Since(toolStart)))
+
 			step := ToolAgentStep{
 				Reasoning: decision.Reasoning,
 				ToolName:  toolName,
