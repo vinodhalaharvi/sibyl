@@ -30,6 +30,11 @@ type Activities struct {
 	// real tools (web_search, calculator, file_read, your own custom
 	// tools) before passing the registry here.
 	Tools *ToolRegistry
+	// Stream, if set, enables token-by-token streaming for activities
+	// that opt in via CompleteWithStreaming. Backends that don't support
+	// streaming (claude-code, scripted) leave this nil; the streaming
+	// helper falls back to atomic Complete and emits one chunk event.
+	Stream CompleteStreamFunc
 }
 
 // ResearchInput is the input to the Research activity.
@@ -96,7 +101,7 @@ func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, er
 	ctx, span := StartActivitySpan(ctx, ResearchActivityName)
 	defer span.End()
 
-	emitter := EmitterFromContext(ctx)
+	emitter := EmitterForActivity(ctx)
 	start := time.Now()
 	emitter.Emit(NewActivityStarted("", ResearchActivityName, ""))
 
@@ -167,7 +172,7 @@ func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, e
 	ctx, span := StartActivitySpan(ctx, CritiqueActivityName)
 	defer span.End()
 
-	emitter := EmitterFromContext(ctx)
+	emitter := EmitterForActivity(ctx)
 	start := time.Now()
 	emitter.Emit(NewActivityStarted("", CritiqueActivityName, ""))
 

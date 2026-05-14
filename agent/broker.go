@@ -329,10 +329,81 @@ func WithEmitter(ctx context.Context, emitter *Emitter) context.Context {
 // EmitterFromContext returns the Emitter stored in ctx, or a no-op
 // Emitter if none is set. Always returns a usable *Emitter — callers
 // can `EmitterFromContext(ctx).Emit(...)` without nil checks.
+//
+// If no Emitter is in context but a global broker has been set via
+// SetGlobalBroker, this returns an emitter bound to that broker with
+// the workflow ID resolved from Temporal's activity context (when
+// running inside an activity). This is how Temporal activities emit
+// events without anyone having to plumb the broker through the SDK's
+// context.
 func EmitterFromContext(ctx context.Context) *Emitter {
-	e, ok := ctx.Value(emitterKey{}).(*Emitter)
-	if !ok || e == nil {
-		return &Emitter{} // no-op
+	if e, ok := ctx.Value(emitterKey{}).(*Emitter); ok && e != nil {
+		return e
 	}
-	return e
+	// Fall back to global broker if one is registered.
+	if b := getGlobalBroker(); b != nil {
+		wid := workflowIDFromActivityContext(ctx)
+		return &Emitter{broker: b, workflowID: wid}
+	}
+	return &Emitter{} // no-op
+}
+
+// --- Global broker --------------------------------------------------------
+//
+// Temporal activities run with a ctx built by the SDK. There's no clean
+// hook to inject an Emitter via context.WithValue before activities fire.
+// To avoid 100+ lines of WorkerInterceptor machinery, we let the worker
+// register a global broker at startup; EmitterFromContext picks it up
+// when no per-call emitter was injected.
+//
+// Globals are normally avoided, but here it's the right tool:
+//   - One broker per worker process matches Sibyl's deployment model.
+//   - The fallback is opt-in: if SetGlobalBroker isn't called, behavior
+//     is identical to before (no events emitted).
+//   - Tests can use the per-context emitter to override the global.
+
+var (
+	globalBrokerMu sync.RWMutex
+	globalBroker   Broker
+)
+
+// SetGlobalBroker registers a process-wide Broker that activities use
+// when no Emitter has been injected into their context. Typically called
+// once at worker startup. Pass nil to clear (useful in tests).
+func SetGlobalBroker(b Broker) {
+	globalBrokerMu.Lock()
+	globalBroker = b
+	globalBrokerMu.Unlock()
+}
+
+// getGlobalBroker returns the currently registered global broker, or nil.
+func getGlobalBroker() Broker {
+	globalBrokerMu.RLock()
+	defer globalBrokerMu.RUnlock()
+	return globalBroker
+}
+
+// workflowIDFromActivityContext extracts the Temporal workflow ID from
+// an activity's context, returning "" when not running inside an activity
+// (tests, direct arrow calls, etc).
+//
+// We use a string-typed key lookup so we don't depend on the temporal
+// SDK from this file — broker.go stays SDK-agnostic. The caller (the
+// activity registration glue in worker/worker.go) is responsible for
+// setting this value when wrapping activities. If unset, we return "".
+func workflowIDFromActivityContext(ctx context.Context) string {
+	if wid, ok := ctx.Value(workflowIDKey{}).(string); ok {
+		return wid
+	}
+	return ""
+}
+
+// workflowIDKey is the context key for the activity's workflow ID.
+type workflowIDKey struct{}
+
+// WithWorkflowID stamps a workflow ID on the context for later retrieval
+// by activities. Called by the worker registration glue around each
+// activity invocation.
+func WithWorkflowID(ctx context.Context, workflowID string) context.Context {
+	return context.WithValue(ctx, workflowIDKey{}, workflowID)
 }

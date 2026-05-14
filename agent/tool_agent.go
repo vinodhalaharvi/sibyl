@@ -152,7 +152,7 @@ func runToolAgentLoop(
 					"InvalidLLMResponse", nil)
 			}
 
-			emitter := EmitterFromContext(ctx)
+			emitter := EmitterForActivity(ctx)
 			emitter.Emit(NewToolCalled("", toolName, decision.Args, step+1))
 			toolStart := time.Now()
 

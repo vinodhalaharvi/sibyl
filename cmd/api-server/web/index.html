@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Sibyl — Live DAG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Instrument+Serif&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; }
+  body {
+    background: #0a0a0b; color: #e8e8e0;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px; line-height: 1.5; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  :root {
+    --bg: #0a0a0b; --bg-elev-1: #121214; --bg-elev-2: #1a1a1d;
+    --line: #26262a; --line-strong: #3a3a40;
+    --ink: #e8e8e0; --ink-dim: #8a8a82; --ink-faint: #55554e;
+    --accent: #f4f028; --ok: #6eff8a; --bad: #ff4242; --running: #7ab8ff;
+  }
+  .app { display: grid; grid-template-rows: 56px 1fr; height: 100vh; }
+  .topbar {
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; padding: 0 18px; gap: 24px;
+    background: var(--bg); position: relative; z-index: 10;
+  }
+  .topbar::before {
+    content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent) 50%, transparent);
+    opacity: 0.4;
+  }
+  .brand { font-family: 'Instrument Serif', serif; font-size: 24px; letter-spacing: -0.5px; font-style: italic; color: var(--accent); }
+  .brand-sub { font-size: 10px; color: var(--ink-faint); letter-spacing: 0.15em; text-transform: uppercase; margin-left: -16px; margin-top: 4px; }
+  .topbar-spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px;
+    border: 1px solid var(--line);
+    font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim);
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
+  .pill.live .dot { background: var(--ok); animation: pulse 1.6s ease-out infinite; }
+  .pill.failed .dot { background: var(--bad); }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(110, 255, 138, 0.7); }
+    70%  { box-shadow: 0 0 0 8px rgba(110, 255, 138, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(110, 255, 138, 0); }
+  }
+  .main { display: grid; grid-template-columns: 1fr 420px; height: 100%; }
+  .graph-pane {
+    position: relative;
+    background:
+      radial-gradient(ellipse at 30% 20%, rgba(244,240,40,0.04), transparent 50%),
+      radial-gradient(ellipse at 70% 80%, rgba(122,184,255,0.04), transparent 50%),
+      var(--bg);
+    overflow: hidden; border-right: 1px solid var(--line);
+  }
+  .graph-pane::before {
+    content: ''; position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 32px 32px; pointer-events: none;
+  }
+  .graph-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .graph-meta { position: absolute; top: 18px; left: 18px; display: flex; flex-direction: column; gap: 12px; z-index: 4; }
+  .meta-row { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-faint); }
+  .meta-row b { color: var(--ink-dim); font-weight: 500; }
+  .meta-row.wfid { color: var(--ink); font-size: 11px; letter-spacing: 0.05em; text-transform: none; }
+  .controls { position: absolute; bottom: 18px; left: 18px; display: flex; gap: 8px; z-index: 4; }
+  .btn {
+    background: var(--bg); border: 1px solid var(--line-strong); color: var(--ink);
+    padding: 8px 14px; font: inherit; font-size: 11px;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    cursor: pointer; transition: all 0.15s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #0a0a0b; font-weight: 700; }
+  .btn.primary:hover { background: #fff67a; border-color: #fff67a; color: #000; }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn:disabled:hover { border-color: var(--line-strong); color: var(--ink); }
+  .node {
+    position: absolute; width: 220px;
+    border: 1px solid var(--line-strong); background: var(--bg-elev-1);
+    transition: border-color 0.2s, transform 0.3s ease, box-shadow 0.3s;
+  }
+  .node-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg-elev-2);
+  }
+  .node-id { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-dim); }
+  .node-status { display: inline-flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
+  .node-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
+  .node-body { padding: 10px 12px; font-size: 11px; color: var(--ink-dim); min-height: 64px; max-height: 140px; overflow: hidden; }
+  .node-output { color: var(--ink); font-size: 11px; line-height: 1.45; }
+  .node-output .blink::after { content: '▍'; display: inline-block; color: var(--accent); animation: blink 1s steps(2) infinite; margin-left: 2px; }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+  .node-footer { border-top: 1px solid var(--line); padding: 6px 12px; display: flex; justify-content: space-between; font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+  .node.idle    { opacity: 0.55; }
+  .node.running { border-color: var(--running); }
+  .node.running .node-head { background: rgba(122,184,255,0.08); }
+  .node.running .node-status { color: var(--running); }
+  .node.running .node-status .dot { background: var(--running); animation: nodePulse 1.2s ease-out infinite; }
+  @keyframes nodePulse {
+    0%   { box-shadow: 0 0 0 0 rgba(122,184,255,0.6); }
+    70%  { box-shadow: 0 0 0 7px rgba(122,184,255,0); }
+    100% { box-shadow: 0 0 0 0 rgba(122,184,255,0); }
+  }
+  .node.done { border-color: var(--ok); }
+  .node.done .node-head { background: rgba(110,255,138,0.06); }
+  .node.done .node-status { color: var(--ok); }
+  .node.done .node-status .dot { background: var(--ok); }
+  .node.failed { border-color: var(--bad); }
+  .node.failed .node-head { background: rgba(255,66,66,0.08); }
+  .node.failed .node-status { color: var(--bad); }
+  .node.failed .node-status .dot { background: var(--bad); }
+  .edge-base { stroke: var(--line); stroke-width: 1.5; fill: none; }
+  .edge-active { stroke: var(--running); stroke-width: 2; fill: none; opacity: 0.8; }
+  .edge-done { stroke: var(--ok); stroke-width: 1.5; fill: none; opacity: 0.6; }
+  .edge-flowing { stroke-dasharray: 4 4; animation: flowdash 0.6s linear infinite; }
+  @keyframes flowdash { to { stroke-dashoffset: -8; } }
+  .transcript { display: grid; grid-template-rows: auto auto 1fr; background: var(--bg-elev-1); height: 100%; overflow: hidden; }
+  .transcript-head { padding: 18px; border-bottom: 1px solid var(--line); }
+  .transcript-title { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px; }
+  .diff-input { width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--ink); font: inherit; font-size: 12px; padding: 10px; resize: vertical; min-height: 80px; font-family: 'JetBrains Mono', monospace; }
+  .diff-input:focus { outline: none; border-color: var(--accent); }
+  .transcript-feed { overflow-y: auto; padding: 8px 0; }
+  .transcript-feed::-webkit-scrollbar { width: 6px; }
+  .transcript-feed::-webkit-scrollbar-thumb { background: var(--line-strong); }
+  .event {
+    padding: 10px 18px; border-left: 2px solid transparent;
+    display: grid; grid-template-columns: 60px 1fr; gap: 12px; font-size: 11px;
+    animation: eventEnter 0.4s ease-out; opacity: 0; animation-fill-mode: forwards;
+  }
+  @keyframes eventEnter { 0% { opacity: 0; transform: translateX(8px); } 100% { opacity: 1; transform: translateX(0); } }
+  .event-time { color: var(--ink-faint); font-variant-numeric: tabular-nums; font-size: 10px; }
+  .event-node-id { color: var(--ink-dim); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 2px; }
+  .event-text { color: var(--ink); line-height: 1.5; }
+  .event.start { border-left-color: var(--running); }
+  .event.start .event-node-id { color: var(--running); }
+  .event.done  { border-left-color: var(--ok); }
+  .event.done .event-node-id { color: var(--ok); }
+  .event.failed { border-left-color: var(--bad); }
+  .event.failed .event-node-id { color: var(--bad); }
+  .event.synthesis {
+    padding-top: 24px; padding-bottom: 24px;
+    border-left-color: var(--accent);
+    background: linear-gradient(90deg, rgba(244,240,40,0.06), transparent 60%);
+  }
+  .event.synthesis .event-node-id { color: var(--accent); }
+  .event.synthesis .event-text { font-family: 'Instrument Serif', serif; font-size: 14px; font-style: italic; line-height: 1.5; }
+  .empty-state { padding: 32px 18px; color: var(--ink-faint); font-size: 11px; text-align: center; }
+  .empty-state b { display: block; color: var(--ink-dim); font-size: 14px; margin-bottom: 6px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .legend {
+    position: absolute; bottom: 18px; right: 18px;
+    display: flex; flex-direction: column; gap: 4px;
+    font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-faint);
+    background: rgba(10,10,11,0.85); border: 1px solid var(--line);
+    padding: 10px 12px; z-index: 4;
+  }
+  .legend-row { display: flex; align-items: center; gap: 8px; }
+  .legend-dot { width: 6px; height: 6px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+const NODES = [
+  { id: 'input',          label: 'INPUT',          title: 'Diff submitted',           x: 40,  y: 240 },
+  { id: 'parse_diff',     label: 'PARSE_DIFF',     title: 'Parse the unified diff',    x: 320, y: 240 },
+  { id: 'security_audit', label: 'SECURITY_AUDIT', title: 'Security review',           x: 640, y: 60  },
+  { id: 'test_coverage',  label: 'TEST_COVERAGE',  title: 'Test coverage assessment',  x: 640, y: 240 },
+  { id: 'style_check',    label: 'STYLE_CHECK',    title: 'Style & idioms review',     x: 640, y: 420 },
+  { id: 'synthesize',     label: 'SYNTHESIZE',     title: 'Final verdict',             x: 960, y: 240 },
+];
+const EDGES = [
+  { from: 'input',          to: 'parse_diff' },
+  { from: 'parse_diff',     to: 'security_audit' },
+  { from: 'parse_diff',     to: 'test_coverage' },
+  { from: 'parse_diff',     to: 'style_check' },
+  { from: 'security_audit', to: 'synthesize' },
+  { from: 'test_coverage',  to: 'synthesize' },
+  { from: 'style_check',    to: 'synthesize' },
+];
+const DEFAULT_DIFF = `PR #4218: Switch agent cache from in-memory to SQLite
+
+agent/cache_sqlite.go: new SQLite-backed Cache implementation using
+mattn/go-sqlite3. TTL-based eviction; reads under read tx, writes
+under write tx. SQL uses parameter binding throughout.
+
+agent/cache_test.go: adds 9 new tests covering TTL expiry, concurrent
+read/write, persistence across reopens, and corrupt-file recovery.
+
+cmd/worker/main.go: new -cache flag (memory|sqlite|none) and -cache-path
+flag for the SQLite path.`;
+
+function App() {
+  const [diff, setDiff] = useState(DEFAULT_DIFF);
+  const [workflowId, setWorkflowId] = useState(null);
+  const [statuses, setStatuses] = useState(() => Object.fromEntries(NODES.map(n => [n.id, 'idle'])));
+  const [outputs, setOutputs] = useState({});
+  const [events, setEvents] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [startTime, setStartTime] = useState(null);
+  const [now, setNow] = useState(0);
+  const [finalStatus, setFinalStatus] = useState(null);
+  const eventSourceRef = useRef(null);
+  const feedRef = useRef(null);
+
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(id);
+  }, [running]);
+
+  useEffect(() => {
+    if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
+  }, [events]);
+
+  useEffect(() => () => {
+    if (eventSourceRef.current) eventSourceRef.current.close();
+  }, []);
+
+  const reset = () => {
+    if (eventSourceRef.current) { eventSourceRef.current.close(); eventSourceRef.current = null; }
+    setStatuses(Object.fromEntries(NODES.map(n => [n.id, 'idle'])));
+    setOutputs({});
+    setEvents([]);
+    setRunning(false);
+    setStartTime(null);
+    setNow(0);
+    setFinalStatus(null);
+    setWorkflowId(null);
+  };
+  const elapsed = () => startTime ? ((now - startTime) / 1000).toFixed(1) : '0.0';
+  const pushEvent = (ev) => setEvents(prev => [...prev, { ...ev, id: prev.length, t: Date.now() }]);
+
+  const run = async () => {
+    reset();
+    await new Promise(r => setTimeout(r, 30));
+    setRunning(true);
+    const t0 = Date.now();
+    setStartTime(t0);
+    setStatuses(prev => ({ ...prev, input: 'done' }));
+    setOutputs(prev => ({ ...prev, input: { text: diff.split('\n')[0], streaming: false } }));
+
+    let wfId;
+    try {
+      const resp = await fetch('/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ diff }),
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        pushEvent({ type: 'failed', nodeId: 'system', label: 'ERROR', text: `Start failed: ${err}` });
+        setRunning(false); setFinalStatus('failed'); return;
+      }
+      const data = await resp.json();
+      wfId = data.workflow_id;
+      setWorkflowId(wfId);
+      pushEvent({ type: 'start', nodeId: 'workflow', label: 'WORKFLOW', text: `Started ${wfId}` });
+    } catch (e) {
+      pushEvent({ type: 'failed', nodeId: 'system', label: 'ERROR', text: `Network error: ${e.message}` });
+      setRunning(false); setFinalStatus('failed'); return;
+    }
+
+    const es = new EventSource(`/events?workflow_id=${encodeURIComponent(wfId)}`);
+    eventSourceRef.current = es;
+    const handle = (eventName) => (msg) => {
+      let payload; try { payload = JSON.parse(msg.data); } catch { return; }
+      onSSE(eventName, payload, t0);
+    };
+    [
+      'workflow.started', 'workflow.completed', 'workflow.failed',
+      'node.started', 'node.completed', 'node.failed',
+      'activity.started', 'activity.completed',
+      'llm.token',
+      'tool.called', 'tool.completed',
+    ].forEach(name => es.addEventListener(name, handle(name)));
+    es.onerror = () => { /* server closes after terminal event; that's fine */ };
+  };
+
+  const onSSE = (eventName, payload, t0) => {
+    switch (eventName) {
+      case 'node.started':
+      case 'activity.started': {
+        const nodeId = payload.node_id || mapActivityToNode(payload.activity_name);
+        if (!nodeId) return;
+        setStatuses(prev => ({ ...prev, [nodeId]: 'running' }));
+        pushEvent({ type: 'start', nodeId, label: (payload.activity_name || nodeId).toUpperCase(), text: `${nodeId}…` });
+        break;
+      }
+      case 'node.completed':
+      case 'activity.completed': {
+        const nodeId = payload.node_id || mapActivityToNode(payload.activity_name);
+        if (!nodeId) return;
+        if (payload.error && payload.error !== '') {
+          setStatuses(prev => ({ ...prev, [nodeId]: 'failed' }));
+          pushEvent({ type: 'failed', nodeId, label: (payload.activity_name || nodeId).toUpperCase(), text: payload.error });
+          return;
+        }
+        setStatuses(prev => ({ ...prev, [nodeId]: 'done' }));
+        setOutputs(prev => ({ ...prev, [nodeId]: { ...(prev[nodeId] || { text: '' }), streaming: false } }));
+        const outputText = (payload.output && typeof payload.output === 'string')
+          ? payload.output
+          : (outputs[nodeId]?.text || '');
+        pushEvent({
+          type: nodeId === 'synthesize' ? 'synthesis' : 'done',
+          nodeId,
+          label: (payload.activity_name || nodeId).toUpperCase(),
+          text: outputText || '(no text)',
+        });
+        break;
+      }
+      case 'node.failed': {
+        const nodeId = payload.node_id;
+        setStatuses(prev => ({ ...prev, [nodeId]: 'failed' }));
+        pushEvent({ type: 'failed', nodeId, label: nodeId.toUpperCase(), text: payload.error || 'failed' });
+        break;
+      }
+      case 'llm.token': {
+        const nodeId = payload.call_id;
+        if (!nodeId) return;
+        setOutputs(prev => {
+          const prevText = prev[nodeId]?.text || '';
+          return { ...prev, [nodeId]: { text: prevText + (payload.text || ''), streaming: !payload.final } };
+        });
+        break;
+      }
+      case 'workflow.completed': {
+        setRunning(false); setFinalStatus('completed');
+        if (eventSourceRef.current) { eventSourceRef.current.close(); eventSourceRef.current = null; }
+        break;
+      }
+      case 'workflow.failed': {
+        setRunning(false); setFinalStatus('failed');
+        pushEvent({ type: 'failed', nodeId: 'workflow', label: 'WORKFLOW', text: payload.error || 'workflow failed' });
+        if (eventSourceRef.current) { eventSourceRef.current.close(); eventSourceRef.current = null; }
+        break;
+      }
+    }
+  };
+
+  const edgeKind = (e) => {
+    const a = statuses[e.from], b = statuses[e.to];
+    if (a === 'done' && (b === 'running' || b === 'idle')) return 'active';
+    if (a === 'done' && b === 'done') return 'done';
+    return 'base';
+  };
+
+  const totalNodes = NODES.length;
+  const completedNodes = Object.values(statuses).filter(s => s === 'done').length;
+  const stateLabel = running ? 'Executing'
+    : finalStatus === 'completed' ? 'Complete'
+    : finalStatus === 'failed' ? 'Failed' : 'Idle';
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div>
+          <div className="brand">Sibyl</div>
+          <div className="brand-sub">Live · PR Review DAG</div>
+        </div>
+        <div className="topbar-spacer" />
+        <div className={`pill ${running ? 'live' : ''} ${finalStatus === 'failed' ? 'failed' : ''}`}>
+          <span className="dot" /><span>{stateLabel}</span>
+        </div>
+        <div className="pill">
+          <span>Nodes</span>
+          <span style={{color:'var(--ink)', fontWeight:600}}>{completedNodes}/{totalNodes}</span>
+        </div>
+        <div className="pill">
+          <span>Elapsed</span>
+          <span style={{color:'var(--ink)', fontWeight:600, fontVariantNumeric:'tabular-nums'}}>{elapsed()}s</span>
+        </div>
+      </header>
+
+      <div className="main">
+        <div className="graph-pane">
+          <div className="graph-meta">
+            <div className="meta-row"><b>DAG:</b> pr_review · 6 nodes · 3 layers</div>
+            <div className="meta-row"><b>Workflow:</b></div>
+            <div className="meta-row wfid">{workflowId || '—'}</div>
+          </div>
+
+          <GraphSVG nodes={NODES} edges={EDGES} edgeKind={edgeKind} />
+
+          {NODES.map(n => (
+            <NodeView key={n.id} node={n} status={statuses[n.id]} output={outputs[n.id]} />
+          ))}
+
+          <div className="legend">
+            <div className="legend-row"><span className="legend-dot" style={{background:'var(--ink-faint)'}}/><span>Idle</span></div>
+            <div className="legend-row"><span className="legend-dot" style={{background:'var(--running)'}}/><span>Running</span></div>
+            <div className="legend-row"><span className="legend-dot" style={{background:'var(--ok)'}}/><span>Done</span></div>
+            <div className="legend-row"><span className="legend-dot" style={{background:'var(--bad)'}}/><span>Failed</span></div>
+          </div>
+
+          <div className="controls">
+            <button className="btn primary" onClick={run} disabled={running}>
+              {finalStatus ? '↻ Run Again' : '▶ Run DAG'}
+            </button>
+            <button className="btn" onClick={reset} disabled={running}>Reset</button>
+          </div>
+        </div>
+
+        <aside className="transcript">
+          <div className="transcript-head">
+            <div className="transcript-title">Diff to Review</div>
+            <textarea
+              className="diff-input"
+              value={diff}
+              onChange={e => setDiff(e.target.value)}
+              disabled={running}
+              rows={5}
+            />
+          </div>
+          <div className="transcript-head" style={{borderBottom: '1px solid var(--line)'}}>
+            <div className="transcript-title">Live Event Stream</div>
+          </div>
+          <div className="transcript-feed" ref={feedRef}>
+            {events.length === 0 ? (
+              <div className="empty-state">
+                <b>Ready</b>
+                Edit the diff above, press "Run DAG".
+                <br/>Watch parallel activities run live.
+                <br/>Kill the worker mid-flight to test durability.
+              </div>
+            ) : (
+              events.map(ev => <EventView key={ev.id} ev={ev} t0={startTime} />)
+            )}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function NodeView({ node, status, output }) {
+  return (
+    <div className={`node ${status}`} style={{ left: node.x, top: node.y }}>
+      <div className="node-head">
+        <div className="node-id">{node.label}</div>
+        <div className="node-status">
+          <span className="dot"/>
+          <span>{statusLabel(status)}</span>
+        </div>
+      </div>
+      <div className="node-body">
+        {output && output.text ? (
+          <div className="node-output">
+            <span>{truncate(output.text, 220)}</span>
+            {output.streaming && <span className="blink"/>}
+          </div>
+        ) : (
+          <span style={{color:'var(--ink-faint)'}}>pending</span>
+        )}
+      </div>
+      <div className="node-footer">
+        <span>{node.title}</span>
+      </div>
+    </div>
+  );
+}
+
+function statusLabel(s) {
+  if (s === 'idle')    return 'Idle';
+  if (s === 'running') return 'Running';
+  if (s === 'done')    return 'Done';
+  if (s === 'failed')  return 'Failed';
+  return s;
+}
+function truncate(s, n) {
+  if (!s) return '';
+  if (s.length <= n) return s;
+  return s.slice(0, n).trimEnd() + '…';
+}
+
+function GraphSVG({ nodes, edges, edgeKind }) {
+  const anchorOut = (n) => ({ x: n.x + 220, y: n.y + 60 });
+  const anchorIn  = (n) => ({ x: n.x,        y: n.y + 60 });
+  return (
+    <svg className="graph-svg" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow-base" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8" fill="none" stroke="var(--line)" strokeWidth="1.4" />
+        </marker>
+        <marker id="arrow-active" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8" fill="none" stroke="var(--running)" strokeWidth="1.6" />
+        </marker>
+        <marker id="arrow-done" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8" fill="none" stroke="var(--ok)" strokeWidth="1.4" />
+        </marker>
+      </defs>
+      {edges.map(e => {
+        const a = nodes.find(n => n.id === e.from);
+        const b = nodes.find(n => n.id === e.to);
+        const p1 = anchorOut(a);
+        const p2 = anchorIn(b);
+        const dx = (p2.x - p1.x) * 0.5;
+        const d = `M ${p1.x},${p1.y} C ${p1.x + dx},${p1.y} ${p2.x - dx},${p2.y} ${p2.x},${p2.y}`;
+        const kind = edgeKind(e);
+        let className = 'edge-base';
+        let marker = 'url(#arrow-base)';
+        if (kind === 'active') { className = 'edge-active edge-flowing'; marker = 'url(#arrow-active)'; }
+        else if (kind === 'done') { className = 'edge-done'; marker = 'url(#arrow-done)'; }
+        return <path key={`${e.from}-${e.to}`} d={d} className={className} markerEnd={marker} />;
+      })}
+    </svg>
+  );
+}
+
+function EventView({ ev, t0 }) {
+  const dt = t0 ? ((ev.t - t0) / 1000).toFixed(1) + 's' : '';
+  return (
+    <div className={`event ${ev.type}`}>
+      <div className="event-time">{dt}</div>
+      <div>
+        <div className="event-node-id">{ev.label}</div>
+        <div className="event-text">{ev.text}</div>
+      </div>
+    </div>
+  );
+}
+
+function mapActivityToNode(activityName) {
+  if (!activityName) return null;
+  return {
+    'ParseDiff':         'parse_diff',
+    'SecurityAudit':     'security_audit',
+    'TestCoverage':      'test_coverage',
+    'StyleCheck':        'style_check',
+    'SynthesizeReview':  'synthesize',
+  }[activityName] || null;
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

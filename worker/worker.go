@@ -18,6 +18,10 @@ type Options struct {
 	// weft.Arrow of your choosing. Use agent.LLMSynthesizer(complete)
 	// to get an LLM-backed one.
 	Synthesizer weft.Arrow[[]agent.SubAnswer, string]
+	// Stream, if set, gives the PR-review workflow's activities access
+	// to a streaming LLM. Backends without streaming support leave this
+	// nil; the activities fall back to atomic Complete.
+	Stream agent.CompleteStreamFunc
 }
 
 // Register adds Sibyl's workflows and activities to a Temporal worker
@@ -27,13 +31,6 @@ func Register(w worker.Worker, complete agent.CompleteFunc) {
 }
 
 // RegisterWithOptions is Register with explicit options.
-//
-// Use this when you want LLM-backed synthesis or any other configurable
-// behavior:
-//
-//	worker.RegisterWithOptions(w, complete, worker.Options{
-//	    Synthesizer: agent.LLMSynthesizer(complete),
-//	})
 func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Options) {
 	w.RegisterWorkflowWithOptions(agent.ConvergeWorkflow, workflow.RegisterOptions{
 		Name: "ConvergeWorkflow",
@@ -41,10 +38,14 @@ func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Opti
 	w.RegisterWorkflowWithOptions(agent.SupervisorWorkflow, workflow.RegisterOptions{
 		Name: agent.SupervisorWorkflowName,
 	})
+	w.RegisterWorkflowWithOptions(agent.PRReviewWorkflow, workflow.RegisterOptions{
+		Name: agent.ReviewWorkflowName,
+	})
 
 	acts := &agent.Activities{
 		Complete:    complete,
 		Synthesizer: opts.Synthesizer,
+		Stream:      opts.Stream,
 	}
 	w.RegisterActivityWithOptions(acts.Research, activity.RegisterOptions{
 		Name: agent.ResearchActivityName,
@@ -57,5 +58,22 @@ func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Opti
 	})
 	w.RegisterActivityWithOptions(acts.Synthesize, activity.RegisterOptions{
 		Name: agent.SynthesizeActivityName,
+	})
+
+	// PR-review DAG activities.
+	w.RegisterActivityWithOptions(acts.ParseDiff, activity.RegisterOptions{
+		Name: agent.ParseDiffActivityName,
+	})
+	w.RegisterActivityWithOptions(acts.SecurityAudit, activity.RegisterOptions{
+		Name: agent.SecurityAuditActivityName,
+	})
+	w.RegisterActivityWithOptions(acts.TestCoverage, activity.RegisterOptions{
+		Name: agent.TestCoverageActivityName,
+	})
+	w.RegisterActivityWithOptions(acts.StyleCheck, activity.RegisterOptions{
+		Name: agent.StyleCheckActivityName,
+	})
+	w.RegisterActivityWithOptions(acts.SynthesizeReview, activity.RegisterOptions{
+		Name: agent.SynthesizeReviewActivity,
 	})
 }

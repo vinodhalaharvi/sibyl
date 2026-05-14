@@ -145,6 +145,16 @@ func main() {
 		log.Fatalf("unknown -synthesize value: %q (choices: heuristic, llm)", *synthesize)
 	}
 
+	// Streaming: enable for backends that support it (anthropic only today).
+	// nil for others means activities fall back to atomic Complete and emit
+	// a single TokenChunkEvent rather than per-token.
+	if streamFn, err := pickStream(*backend, *model); err != nil {
+		log.Fatalln("stream setup failed:", err)
+	} else if streamFn != nil {
+		opts.Stream = streamFn
+		log.Printf("Sibyl worker streaming enabled for %s backend", *backend)
+	}
+
 	w := worker.New(c, agent.TaskQueue, worker.Options{})
 	sibylworker.RegisterWithOptions(w, complete, opts)
 
@@ -234,6 +244,28 @@ func pickBackend(name, model string) (agent.CompleteFunc, error) {
 
 	default:
 		return nil, &backendError{name: name}
+	}
+}
+
+// pickStream returns the streaming completion function for the named
+// backend, or nil if the backend doesn't support streaming.
+//
+// Only the Anthropic Messages API supports real SSE streaming today.
+// claude-code emits structured JSON but not in a stream-friendly format;
+// scripted backends have no concept of streaming. For those, returning
+// nil signals the activity to use the atomic Complete and emit a single
+// TokenChunkEvent with the full response.
+func pickStream(name, model string) (agent.CompleteStreamFunc, error) {
+	switch name {
+	case "anthropic":
+		cfg := agent.AnthropicConfig{Model: model}
+		c, err := agent.NewAnthropicClient(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return c.CompleteStream, nil
+	default:
+		return nil, nil
 	}
 }
 
