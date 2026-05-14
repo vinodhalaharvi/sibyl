@@ -92,11 +92,21 @@ func PRReviewWorkflow(ctx workflow.Context, in PRReviewInput) (PRReviewOutput, e
 			"Diff must not be empty", "InvalidInput", nil)
 	}
 
-	// Standard activity options. The 90s timeout is generous for an LLM
-	// call; the 3-attempt retry policy absorbs transient failures.
+	// Activity options. StartToCloseTimeout is the per-attempt budget;
+	// for an LLM call we allow 3 minutes to accommodate slow backends
+	// (claude-code can take 30-60s on cold cache; anthropic streaming
+	// can take longer for long responses).
+	//
+	// We deliberately do NOT set HeartbeatTimeout. Heartbeats are for
+	// activities with meaningful progress to report (e.g. "30% through
+	// a 1GB file"). An LLM call has no progress between "started" and
+	// "got response", so a heartbeat would just be a liveness ping —
+	// and StartToCloseTimeout already provides that. Setting both with
+	// a heartbeat shorter than StartToClose would kill activities that
+	// are simply slow but progressing fine, which is exactly the bug
+	// we hit on slow claude-code responses.
 	actCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 90 * time.Second,
-		HeartbeatTimeout:    30 * time.Second,
+		StartToCloseTimeout: 3 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:        time.Second,
 			BackoffCoefficient:     2.0,
