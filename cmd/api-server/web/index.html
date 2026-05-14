@@ -56,20 +56,79 @@
       radial-gradient(ellipse at 30% 20%, rgba(244,240,40,0.04), transparent 50%),
       radial-gradient(ellipse at 70% 80%, rgba(122,184,255,0.04), transparent 50%),
       var(--bg);
-    overflow: hidden; border-right: 1px solid var(--line);
+    /* The pane itself doesn't scroll — the inner .graph-canvas does.
+       This keeps meta/legend/controls pinned to the viewport corners
+       while the user pans the DAG independently. */
+    overflow: hidden;
+    border-right: 1px solid var(--line);
   }
-  .graph-pane::before {
+
+  /* The scrollable inner surface. Fills the pane; scrolls both axes
+     when the DAG is larger than the viewport. */
+  .graph-canvas {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+  }
+  .graph-canvas::-webkit-scrollbar { width: 10px; height: 10px; }
+  .graph-canvas::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
+  .graph-canvas::-webkit-scrollbar-thumb { background: var(--line-strong); }
+  .graph-canvas::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+
+  /* The "world" inside the canvas. Fixed dimensions ensure node
+     coordinates work regardless of viewport size. */
+  .graph-world {
+    position: relative;
+    width: 1240px;
+    height: 540px;
+  }
+  /* Dot grid lives on the scrollable world so it tracks panning. */
+  .graph-world::before {
     content: ''; position: absolute; inset: 0;
     background-image:
       linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
     background-size: 32px 32px; pointer-events: none;
   }
+  /* SVG fills the world, NOT the viewport. */
   .graph-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
   .graph-meta { position: absolute; top: 18px; left: 18px; display: flex; flex-direction: column; gap: 12px; z-index: 4; }
   .meta-row { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-faint); }
   .meta-row b { color: var(--ink-dim); font-weight: 500; }
   .meta-row.wfid { color: var(--ink); font-size: 11px; letter-spacing: 0.05em; text-transform: none; }
+  /* Clickable workflow ID — opens the Temporal Web UI in a new tab. */
+  .wfid-link {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dashed rgba(244,240,40,0.3);
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .wfid-link:hover { color: #fff67a; border-bottom-color: var(--accent); }
+  .wfid-link::after {
+    content: ' ↗';
+    font-size: 10px;
+    color: var(--ink-faint);
+  }
+  .wfid-link:hover::after { color: var(--accent); }
+
+  /* "Open in Temporal" button in the controls row. */
+  .btn.temporal {
+    border-color: var(--line-strong);
+    color: var(--ink-dim);
+  }
+  .btn.temporal:hover { border-color: var(--running); color: var(--running); }
+  .btn.temporal:disabled:hover { border-color: var(--line-strong); color: var(--ink-dim); }
+  .btn.temporal::after { content: ' ↗'; opacity: 0.6; }
+
+  /* Each node card is clickable when a workflow exists; the affordance
+     is subtle to keep the brutalist look. */
+  .node.clickable { cursor: pointer; }
+  .node.clickable:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 4px 16px rgba(244,240,40,0.15);
+    transform: translateY(-2px);
+  }
+  .node.clickable:hover .node-id { color: var(--accent); }
   .controls { position: absolute; bottom: 18px; left: 18px; display: flex; gap: 8px; z-index: 4; }
   .btn {
     background: var(--bg); border: 1px solid var(--line-strong); color: var(--ink);
@@ -94,7 +153,19 @@
   .node-id { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-dim); }
   .node-status { display: inline-flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
   .node-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
-  .node-body { padding: 10px 12px; font-size: 11px; color: var(--ink-dim); min-height: 64px; max-height: 140px; overflow: hidden; }
+  .node-body {
+    padding: 10px 12px;
+    font-size: 11px; color: var(--ink-dim);
+    min-height: 64px; max-height: 140px;
+    /* Long streaming outputs scroll inside the node card rather than
+       being truncated. The blinking cursor follows the bottom of the
+       visible region. */
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .node-body::-webkit-scrollbar { width: 4px; }
+  .node-body::-webkit-scrollbar-track { background: transparent; }
+  .node-body::-webkit-scrollbar-thumb { background: var(--line-strong); }
   .node-output { color: var(--ink); font-size: 11px; line-height: 1.45; }
   .node-output .blink::after { content: '▍'; display: inline-block; color: var(--accent); animation: blink 1s steps(2) infinite; margin-left: 2px; }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
@@ -174,6 +245,29 @@
 
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef } = React;
+
+/* ============================================================
+ * Temporal Web UI integration.
+ *
+ * Click affordances throughout the UI link to the Temporal Web UI
+ * for the current workflow. The base URL defaults to Temporal's
+ * dev-server convention (localhost:8080) but can be overridden via
+ * the global window.SIBYL_TEMPORAL_UI_BASE if a custom deployment
+ * is using a different URL.
+ *
+ * The api-server could inject this via templated HTML in the future;
+ * for now, hard-code with a window override hook.
+ * ============================================================ */
+
+const TEMPORAL_UI_BASE = (typeof window !== 'undefined' && window.SIBYL_TEMPORAL_UI_BASE)
+  || 'http://localhost:8080';
+
+const TEMPORAL_NAMESPACE = 'default';
+
+function temporalWorkflowURL(workflowId) {
+  if (!workflowId) return null;
+  return `${TEMPORAL_UI_BASE}/namespaces/${TEMPORAL_NAMESPACE}/workflows/${encodeURIComponent(workflowId)}`;
+}
 
 const NODES = [
   { id: 'input',          label: 'INPUT',          title: 'Diff submitted',           x: 40,  y: 240 },
@@ -388,18 +482,43 @@ function App() {
 
       <div className="main">
         <div className="graph-pane">
+          {/* Pinned overlay: metadata stays in viewport, doesn't scroll. */}
           <div className="graph-meta">
             <div className="meta-row"><b>DAG:</b> pr_review · 6 nodes · 3 layers</div>
             <div className="meta-row"><b>Workflow:</b></div>
-            <div className="meta-row wfid">{workflowId || '—'}</div>
+            <div className="meta-row wfid">
+              {workflowId ? (
+                <a
+                  className="wfid-link"
+                  href={temporalWorkflowURL(workflowId)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Open in Temporal Web UI"
+                >
+                  {workflowId}
+                </a>
+              ) : '—'}
+            </div>
           </div>
 
-          <GraphSVG nodes={NODES} edges={EDGES} edgeKind={edgeKind} />
+          {/* Scrollable graph canvas. SVG + nodes live inside a fixed-size
+              "world" so they pan together when the viewport is small. */}
+          <div className="graph-canvas">
+            <div className="graph-world">
+              <GraphSVG nodes={NODES} edges={EDGES} edgeKind={edgeKind} />
+              {NODES.map(n => (
+                <NodeView
+                  key={n.id}
+                  node={n}
+                  status={statuses[n.id]}
+                  output={outputs[n.id]}
+                  workflowId={workflowId}
+                />
+              ))}
+            </div>
+          </div>
 
-          {NODES.map(n => (
-            <NodeView key={n.id} node={n} status={statuses[n.id]} output={outputs[n.id]} />
-          ))}
-
+          {/* Pinned overlay: legend and controls also stay in the viewport. */}
           <div className="legend">
             <div className="legend-row"><span className="legend-dot" style={{background:'var(--ink-faint)'}}/><span>Idle</span></div>
             <div className="legend-row"><span className="legend-dot" style={{background:'var(--running)'}}/><span>Running</span></div>
@@ -412,6 +531,14 @@ function App() {
               {finalStatus ? '↻ Run Again' : '▶ Run DAG'}
             </button>
             <button className="btn" onClick={reset} disabled={running}>Reset</button>
+            <button
+              className="btn temporal"
+              onClick={() => window.open(temporalWorkflowURL(workflowId), '_blank', 'noopener,noreferrer')}
+              disabled={!workflowId}
+              title="Open this workflow in Temporal Web UI"
+            >
+              Temporal
+            </button>
           </div>
         </div>
 
@@ -447,9 +574,36 @@ function App() {
   );
 }
 
-function NodeView({ node, status, output }) {
+function NodeView({ node, status, output, workflowId }) {
+  // Each node card is clickable when a workflow is in flight — clicking
+  // opens the Temporal Web UI's view of the workflow event history.
+  // Temporal doesn't have per-activity URLs, so all clicks land on the
+  // same workflow page (the activity is visible in its event list).
+  const clickable = !!workflowId;
+  const onClick = clickable
+    ? () => window.open(temporalWorkflowURL(workflowId), '_blank', 'noopener,noreferrer')
+    : undefined;
+  const title = clickable
+    ? `Open workflow in Temporal Web UI`
+    : node.title;
+
+  // Keep the node body scrolled to the bottom as tokens stream in, so
+  // the blinking cursor stays visible. Only scrolls when streaming or
+  // when text changes; user can still scroll back manually.
+  const bodyRef = useRef(null);
+  useEffect(() => {
+    if (bodyRef.current && output?.streaming) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [output?.text, output?.streaming]);
+
   return (
-    <div className={`node ${status}`} style={{ left: node.x, top: node.y }}>
+    <div
+      className={`node ${status} ${clickable ? 'clickable' : ''}`}
+      style={{ left: node.x, top: node.y }}
+      onClick={onClick}
+      title={title}
+    >
       <div className="node-head">
         <div className="node-id">{node.label}</div>
         <div className="node-status">
@@ -457,10 +611,10 @@ function NodeView({ node, status, output }) {
           <span>{statusLabel(status)}</span>
         </div>
       </div>
-      <div className="node-body">
+      <div className="node-body" ref={bodyRef}>
         {output && output.text ? (
           <div className="node-output">
-            <span>{truncate(output.text, 220)}</span>
+            <span>{output.text}</span>
             {output.streaming && <span className="blink"/>}
           </div>
         ) : (
