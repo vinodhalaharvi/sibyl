@@ -156,13 +156,18 @@ func runToolAgentLoop(
 			emitter.Emit(NewToolCalled("", toolName, decision.Args, step+1))
 			toolStart := time.Now()
 
+			// OTel span around the tool dispatch — visible in traces with
+			// duration and (on error) the failure message. We end the
+			// span explicitly per iteration, not via defer, so it doesn't
+			// accumulate spans across loop iterations.
+			toolCtx, span := StartToolSpan(ctx, toolName, step+1)
+
 			tool, ok := tools.Get(toolName)
 			if !ok {
-				// The LLM picked a non-existent tool. Treat as a soft
-				// error: append a synthetic tool result that tells the
-				// LLM the tool doesn't exist, so it can recover.
 				msg := fmt.Sprintf("Error: tool %q is not registered. Available tools: %s.",
 					toolName, strings.Join(tools.Names(), ", "))
+				RecordError(span, errors.New(msg))
+				span.End()
 				emitter.Emit(NewToolCompleted("", toolName, step+1, "", errors.New(msg), time.Since(toolStart)))
 				history = append(history, ToolAgentStep{
 					Reasoning:  decision.Reasoning,
@@ -173,7 +178,11 @@ func runToolAgentLoop(
 				})
 				continue
 			}
-			result, runErr := tool.Run(ctx, decision.Args)
+			result, runErr := tool.Run(toolCtx, decision.Args)
+			if runErr != nil {
+				RecordError(span, runErr)
+			}
+			span.End()
 			emitter.Emit(NewToolCompleted("", toolName, step+1, result, runErr, time.Since(toolStart)))
 
 			step := ToolAgentStep{

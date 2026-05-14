@@ -18,17 +18,27 @@
 //	sqlite   persistent SQLite cache at -cache-path; survives restarts
 //	none     no caching
 //
+// Observability:
+//
+//	-metrics-addr      ":9090" exposes /metrics for Prometheus
+//	-otel-endpoint     "localhost:4318" enables OTLP/HTTP trace export
+//	-otel-service-name "sibyl-worker" overrides the OTel service.name
+//	-otel-insecure     use HTTP instead of HTTPS to the OTel collector
+//
 // Middleware: every CompleteFunc is wrapped with Logging + Retry + TokenAccounting
-// + (optionally) Cache. Token totals are logged on shutdown.
+// + Metrics + (optionally) Cache. Token totals are logged on shutdown.
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
@@ -43,9 +53,42 @@ func main() {
 	cacheKind := flag.String("cache", "memory", "cache: memory | sqlite | none")
 	cachePath := flag.String("cache-path", "./sibyl-cache.db", "sqlite cache path (only used when -cache=sqlite)")
 	cacheTTL := flag.Duration("cache-ttl", time.Hour, "cache entry TTL")
+	metricsAddr := flag.String("metrics-addr", "", "if set, serve /metrics on this address (e.g. ':9090')")
+	otelEndpoint := flag.String("otel-endpoint", "", "OTLP/HTTP endpoint, e.g. 'localhost:4318' (empty disables tracing)")
+	otelService := flag.String("otel-service-name", "sibyl-worker", "OTel service.name resource attribute")
+	otelInsecure := flag.Bool("otel-insecure", true, "use HTTP (not HTTPS) to the OTel collector")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// OTel tracing setup. If -otel-endpoint is empty, this is a no-op
+	// and tracing call sites cost ~zero.
+	tracingShutdown, err := agent.SetupTracing(context.Background(), agent.TracingConfig{
+		ServiceName: *otelService,
+		Endpoint:    *otelEndpoint,
+		Insecure:    *otelInsecure,
+	})
+	if err != nil {
+		log.Fatalln("otel setup failed:", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(ctx)
+	}()
+	if *otelEndpoint != "" {
+		log.Printf("Sibyl worker exporting OTel traces to: %s (service=%s)", *otelEndpoint, *otelService)
+	}
+
+	// Prometheus metrics: always constructed (cheap; no-op if no /metrics
+	// endpoint is served). The middleware uses it regardless so token
+	// counts and call rates are always recorded — the /metrics endpoint
+	// just makes them queryable.
+	metrics := agent.NewMetrics()
+	if *metricsAddr != "" {
+		go serveMetrics(*metricsAddr, metrics)
+		log.Printf("Sibyl worker serving Prometheus metrics on %s/metrics", *metricsAddr)
+	}
 
 	rawComplete, err := pickBackend(*backend, *model)
 	if err != nil {
@@ -56,16 +99,17 @@ func main() {
 	log.Printf("Sibyl worker using cache: %s", *cacheKind)
 
 	// Build the middleware chain. Order matters:
-	//   cache -> retry -> tokens -> logging -> raw
+	//   cache -> metrics -> retry -> tokens -> logging -> raw
 	// Reading inside-out at call time: cache hit returns early; misses
 	// flow through retry (absorb transient errors), then through token
-	// accounting, then through logging (records the call), then to the
-	// raw LLM client.
+	// accounting and metrics (recorded once per attempt that reached the
+	// real backend), then through logging, then to the raw LLM client.
 	tokenSink := &agent.AtomicTokenSink{}
 	mws := []agent.Middleware{
 		agent.WithLogging(logger),
 		agent.WithTokenAccounting(tokenSink),
 		agent.WithRetry(3, 200*time.Millisecond),
+		agent.WithMetrics(metrics, *backend),
 	}
 	cache, err := buildCache(*cacheKind, *cachePath, *cacheTTL)
 	if err != nil {
@@ -115,6 +159,26 @@ func main() {
 
 	if runErr != nil {
 		log.Fatalln("worker stopped with error:", runErr)
+	}
+}
+
+// serveMetrics starts a tiny HTTP server exposing /metrics. Runs in a
+// goroutine; errors are logged but don't stop the worker — losing
+// metrics scrape capability shouldn't kill the agent.
+func serveMetrics(addr string, m *agent.Metrics) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(m.Registry(), promhttp.HandlerOpts{}))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("metrics server error: %v", err)
 	}
 }
 

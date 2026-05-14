@@ -90,6 +90,12 @@ func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, er
 		return "", temporal.NewNonRetryableApplicationError(
 			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
+	// OTel span: shows up in traces alongside the (separate) event emission.
+	// The span exists even when no exporter is configured; the global no-op
+	// TracerProvider makes this nearly free.
+	ctx, span := StartActivitySpan(ctx, ResearchActivityName)
+	defer span.End()
+
 	emitter := EmitterFromContext(ctx)
 	start := time.Now()
 	emitter.Emit(NewActivityStarted("", ResearchActivityName, ""))
@@ -98,6 +104,7 @@ func (a *Activities) Research(ctx context.Context, in ResearchInput) (string, er
 
 	emitter.Emit(NewActivityCompleted("", ResearchActivityName, "", err, time.Since(start)))
 	if err != nil {
+		RecordError(span, err)
 		return "", fmt.Errorf("researcher pipeline failed: %w", err)
 	}
 	return out, nil
@@ -157,6 +164,9 @@ func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, e
 		return Verdict{}, temporal.NewNonRetryableApplicationError(
 			"Activities.Complete is nil", "ConfigurationError", nil)
 	}
+	ctx, span := StartActivitySpan(ctx, CritiqueActivityName)
+	defer span.End()
+
 	emitter := EmitterFromContext(ctx)
 	start := time.Now()
 	emitter.Emit(NewActivityStarted("", CritiqueActivityName, ""))
@@ -164,5 +174,8 @@ func (a *Activities) Critique(ctx context.Context, in CritiqueInput) (Verdict, e
 	v, err := makeCriticArrow(a.Complete)(ctx, in)
 
 	emitter.Emit(NewActivityCompleted("", CritiqueActivityName, "", err, time.Since(start)))
+	if err != nil {
+		RecordError(span, err)
+	}
 	return v, err
 }

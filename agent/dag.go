@@ -355,10 +355,15 @@ func (c *CompiledDAG) Execute(ctx context.Context, seed map[NodeID]any) (map[Nod
 				nodeStart := time.Now()
 				emitter.Emit(NewNodeStarted("", string(n.ID), string(n.ID)))
 
-				out, err := n.Arrow(layerCtx, inputs)
+				// OTel span: parent of any tracing the node arrow itself does.
+				spanCtx, span := StartNodeSpan(layerCtx, string(n.ID))
+				out, err := n.Arrow(spanCtx, inputs)
+				span.End()
+
 				dur := time.Since(nodeStart)
 
 				if err != nil {
+					RecordError(span, err)
 					emitter.Emit(NewNodeFailed("", string(n.ID), string(n.ID), err, dur))
 					errCh <- &NodeError{NodeID: n.ID, Err: err}
 					cancelLayer()
