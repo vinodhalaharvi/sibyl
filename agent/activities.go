@@ -25,6 +25,10 @@ type Activities struct {
 	// in Activities.Synthesize. Use agent.LLMSynthesizer(complete) to
 	// get an LLM-backed one, or roll your own weft.Arrow.
 	Synthesizer weft.Arrow[[]SubAnswer, string]
+	// Tools, if set, makes the RunToolAgent activity available. Register
+	// real tools (web_search, calculator, file_read, your own custom
+	// tools) before passing the registry here.
+	Tools *ToolRegistry
 }
 
 // ResearchInput is the input to the Research activity.
