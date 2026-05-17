@@ -83,23 +83,6 @@ func NewActivities(reg *Registry, stores map[string]TokenStore, mapper StateMapp
 	}
 }
 
-// BuildAuthorizeURL is the BuildAuthorizeURLActivityName activity.
-// It generates fresh State / PKCE values, then asks the provider's
-// Authorize arrow to construct the redirect URL.
-func (a *Activities) BuildAuthorizeURL(ctx context.Context, in BuildAuthorizeURLInput) (AuthorizeRedirect, error) {
-	provider, err := a.Providers.Get(in.Provider)
-	if err != nil {
-		return AuthorizeRedirect{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("provider %q not registered", in.Provider),
-			"ConfigurationError", nil)
-	}
-	req, err := NewAuthRequest(in.Provider, in.RedirectURI, in.Scopes)
-	if err != nil {
-		return AuthorizeRedirect{}, err
-	}
-	return provider.Authorize(ctx, req)
-}
-
 // Exchange is the ExchangeActivityName activity.
 func (a *Activities) Exchange(ctx context.Context, in ExchangeActivityInput) (TokenPair, error) {
 	provider, err := a.Providers.Get(in.Provider)
@@ -135,17 +118,6 @@ func (a *Activities) StoreTokens(ctx context.Context, in StoreTokensActivityInpu
 			"ConfigurationError", nil)
 	}
 	return store.Put(ctx, in.Identity, in.Provider, in.Tokens)
-}
-
-// StoreStateMapping is the StoreStateMappingActivityName activity.
-// It records the (state -> workflow-id) mapping so the callback handler
-// can route incoming callbacks.
-func (a *Activities) StoreStateMapping(ctx context.Context, in StoreStateMappingInput) error {
-	if a.StateMapper == nil {
-		return temporal.NewNonRetryableApplicationError(
-			"state mapper not configured", "ConfigurationError", nil)
-	}
-	return a.StateMapper.Put(ctx, in.State, in.WorkflowID)
 }
 
 // StateMapper resolves OAuth state values back to the workflow ID

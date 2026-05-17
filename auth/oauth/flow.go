@@ -110,11 +110,52 @@ func NewFlow(p Provider, store TokenStore) Flow {
 // AuthenticationError, the wrapper calls Refresh, persists the new
 // tokens, and retries the underlying arrow exactly once.
 //
-// "AuthenticationError" is the sentinel produced by Provider
-// implementations when a 401 is observed. Wrapping callers that
-// don't return this sentinel will not benefit from refresh.
+// TokenCall is the shape an inner arrow must have to be wrapped with
+// WithRefresh. It receives the current TokenPair (loaded fresh from
+// the store by the wrapper) plus the user input. Returning an
+// AuthenticationError triggers the wrapper to refresh and retry once.
+//
+// Why this shape and not weft.Arrow[I, O]?
+//
+//	The wrapper needs to control which token the inner call uses.
+//	If we passed weft.Arrow[I, O], the inner closure would have to
+//	capture a token reference, and that reference would be stale after
+//	refresh. By passing the token explicitly, the inner code is forced
+//	to use whatever the wrapper provides — guaranteeing the retry uses
+//	the freshly-refreshed token.
+type TokenCall[I, O any] func(ctx context.Context, in I, token TokenPair) (O, error)
+
+// WithRefresh wraps a TokenCall so that, on AuthenticationError, the
+// wrapper refreshes the stored TokenPair and retries the call once.
+//
+// Behavior:
+//
+//  1. Load current tokens from store for (identity, provider).
+//  2. Invoke inner call with those tokens.
+//  3. On AuthenticationError: refresh tokens, persist, retry once.
+//  4. On non-auth error or success: return result as-is. No retry.
+//  5. If the retry itself returns AuthenticationError, no second
+//     retry — return the wrapped error. Repeated refresh failures
+//     usually indicate a genuinely-invalid refresh token, not a
+//     transient issue.
+//
+// Usage pattern:
+//
+//	listIssues := oauth.WithRefresh(
+//	  func(ctx context.Context, query string, tok oauth.TokenPair) ([]Issue, error) {
+//	      // Use tok.AccessToken in your HTTP call.
+//	      // Return oauth.AuthenticationError{Status: 401} when you see one.
+//	      return githubAPI.ListIssues(ctx, tok.AccessToken, query)
+//	  },
+//	  provider.Refresh, store, identity, "github",
+//	)
+//
+//	issues, err := listIssues(ctx, "is:open author:vinodh")
+//
+// The returned function is a plain weft.Arrow[I, O]: composable with
+// any other weft combinator, runnable as a Temporal activity, etc.
 func WithRefresh[I, O any](
-	call weft.Arrow[I, O],
+	call TokenCall[I, O],
 	refresh RefreshArrow,
 	store TokenStore,
 	identity Identity,
@@ -126,22 +167,26 @@ func WithRefresh[I, O any](
 	return func(ctx context.Context, in I) (O, error) {
 		var zero O
 
-		out, err := call(ctx, in)
+		// Load current tokens at every invocation. This is important:
+		// a long-lived weft.Arrow value built once by WithRefresh stays
+		// correct across token refreshes because the lookup happens
+		// inside the returned arrow, not at construction time.
+		tokens, err := store.Get(ctx, identity, provider)
+		if err != nil {
+			return zero, fmt.Errorf("oauth: WithRefresh: load tokens: %w", err)
+		}
+
+		out, err := call(ctx, in, tokens)
 		if err == nil {
 			return out, nil
 		}
 		var authErr AuthenticationError
 		if !errors.As(err, &authErr) {
-			// Not an auth failure; return as-is. No retry.
-			return zero, err
+			return zero, err // non-auth failure; no retry
 		}
 
-		// Refresh: load current tokens, refresh them, store new ones.
-		current, gerr := store.Get(ctx, identity, provider)
-		if gerr != nil {
-			return zero, fmt.Errorf("oauth: WithRefresh: load tokens: %w", gerr)
-		}
-		fresh, rerr := refresh(ctx, current)
+		// Refresh and persist.
+		fresh, rerr := refresh(ctx, tokens)
 		if rerr != nil {
 			return zero, fmt.Errorf("oauth: WithRefresh: refresh: %w", rerr)
 		}
@@ -149,8 +194,10 @@ func WithRefresh[I, O any](
 			return zero, fmt.Errorf("oauth: WithRefresh: store refreshed tokens: %w", perr)
 		}
 
-		// Retry once with the refreshed tokens.
-		out, err = call(ctx, in)
+		// Retry once with the freshly-refreshed tokens. Note we pass
+		// `fresh` explicitly — the inner call never has to ask the
+		// store for it.
+		out, err = call(ctx, in, fresh)
 		if err != nil {
 			return zero, fmt.Errorf("oauth: WithRefresh: retry after refresh: %w", err)
 		}
@@ -182,3 +229,60 @@ func (e AuthenticationError) Error() string {
 
 // Unwrap implements errors.Unwrap.
 func (e AuthenticationError) Unwrap() error { return e.Wrapped }
+
+// CurrentSession returns a Session with the current TokenPair for
+// (identity, provider) — refreshing the token first if it's expired
+// or about to expire (within refreshLeeway).
+//
+// Use this when you need a session value to pass around rather than
+// the WithRefresh combinator. Common pattern in code that has already
+// decided which user it's acting on behalf of:
+//
+//	session, err := oauth.CurrentSession(ctx, store, refresh, identity, "okta", time.Minute)
+//	if err != nil { ... }
+//	// session.Token.AccessToken is fresh enough to use immediately
+//
+// If refreshLeeway is zero, only fully-expired tokens trigger a
+// refresh. A nonzero leeway lets you refresh proactively (e.g. 1
+// minute leeway means "refresh if the token expires within the next
+// minute").
+//
+// Refreshing modifies the stored tokens: a successful refresh is
+// persisted to the store before this function returns.
+func CurrentSession(
+	ctx context.Context,
+	store TokenStore,
+	refresh RefreshArrow,
+	identity Identity,
+	provider string,
+	refreshLeeway time.Duration,
+) (Session, error) {
+	tokens, err := store.Get(ctx, identity, provider)
+	if err != nil {
+		return Session{}, fmt.Errorf("oauth: CurrentSession: load tokens: %w", err)
+	}
+
+	// Refresh if expired or close to it. Tokens with a zero ExpiresAt
+	// (never-expires) skip this check entirely.
+	needsRefresh := tokens.IsExpired() || tokens.IsExpiringWithin(refreshLeeway)
+	if needsRefresh {
+		if refresh == nil {
+			return Session{}, fmt.Errorf("oauth: CurrentSession: token expired and no refresh arrow provided")
+		}
+		fresh, rerr := refresh(ctx, tokens)
+		if rerr != nil {
+			return Session{}, fmt.Errorf("oauth: CurrentSession: refresh: %w", rerr)
+		}
+		if perr := store.Put(ctx, identity, provider, fresh); perr != nil {
+			return Session{}, fmt.Errorf("oauth: CurrentSession: store refreshed tokens: %w", perr)
+		}
+		tokens = fresh
+	}
+
+	return Session{
+		Identity:  identity,
+		Token:     tokens,
+		IssuedAt:  time.Now(),
+		ExpiresAt: tokens.ExpiresAt,
+	}, nil
+}

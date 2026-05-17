@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/vinodhalaharvi/weft/weft"
 
 	"github.com/vinodhalaharvi/sibyl/auth/oauth"
 )
@@ -93,17 +92,71 @@ func TestWithRefresh_PassesThroughOnSuccess(t *testing.T) {
 	require.NoError(t, store.Put(context.Background(), id, "okta", sampleTokens()))
 
 	var callCount atomic.Int32
-	innerCall := weft.Arrow[string, string](func(_ context.Context, in string) (string, error) {
+	innerCall := func(_ context.Context, in string, _ oauth.TokenPair) (string, error) {
 		callCount.Add(1)
 		return "got: " + in, nil
-	})
+	}
 	refresh := makeFakeProvider("okta").Refresh
 
-	wrapped := oauth.WithRefresh(innerCall, refresh, store, id, "okta")
+	wrapped := oauth.WithRefresh[string, string](innerCall, refresh, store, id, "okta")
 	out, err := wrapped(context.Background(), "hello")
 	require.NoError(t, err)
 	require.Equal(t, "got: hello", out)
 	require.EqualValues(t, 1, callCount.Load(), "call should run once on success")
+}
+
+// TestWithRefresh_PassesCurrentTokenFromStore verifies that the inner
+// call receives the token loaded from the store, not a captured one.
+// This is the core of the bug fix in Patch I.
+func TestWithRefresh_PassesCurrentTokenFromStore(t *testing.T) {
+	store := oauth.NewMemoryTokenStore(oauth.NoOpCipher{})
+	defer store.Close()
+	id := sampleIdentity()
+	stored := oauth.TokenPair{AccessToken: "stored-in-store", RefreshToken: "rt"}
+	require.NoError(t, store.Put(context.Background(), id, "okta", stored))
+
+	var seenToken string
+	innerCall := func(_ context.Context, _ struct{}, tok oauth.TokenPair) (string, error) {
+		seenToken = tok.AccessToken
+		return "ok", nil
+	}
+	refresh := makeFakeProvider("okta").Refresh
+
+	wrapped := oauth.WithRefresh[struct{}, string](innerCall, refresh, store, id, "okta")
+	_, err := wrapped(context.Background(), struct{}{})
+	require.NoError(t, err)
+	require.Equal(t, "stored-in-store", seenToken,
+		"inner call must receive the token from the store, not a stale closure capture")
+}
+
+func TestWithRefresh_RetryUsesRefreshedToken(t *testing.T) {
+	// This is the bug-fix regression test. After refresh, the retry
+	// invocation must receive the NEW token, not the original one.
+	store := oauth.NewMemoryTokenStore(oauth.NoOpCipher{})
+	defer store.Close()
+	id := sampleIdentity()
+	require.NoError(t, store.Put(context.Background(), id, "okta", oauth.TokenPair{
+		AccessToken: "old-access", RefreshToken: "rt",
+	}))
+
+	seenTokens := []string{}
+	innerCall := func(_ context.Context, _ struct{}, tok oauth.TokenPair) (string, error) {
+		seenTokens = append(seenTokens, tok.AccessToken)
+		if len(seenTokens) == 1 {
+			return "", oauth.AuthenticationError{Status: 401}
+		}
+		return "second-attempt-ok", nil
+	}
+	refresh := func(_ context.Context, _ oauth.TokenPair) (oauth.TokenPair, error) {
+		return oauth.TokenPair{AccessToken: "fresh-access", RefreshToken: "rt2"}, nil
+	}
+
+	wrapped := oauth.WithRefresh[struct{}, string](innerCall, refresh, store, id, "okta")
+	out, err := wrapped(context.Background(), struct{}{})
+	require.NoError(t, err)
+	require.Equal(t, "second-attempt-ok", out)
+	require.Equal(t, []string{"old-access", "fresh-access"}, seenTokens,
+		"retry must use the refreshed token, not the original")
 }
 
 func TestWithRefresh_RetriesOnAuthenticationError(t *testing.T) {
@@ -115,24 +168,23 @@ func TestWithRefresh_RetriesOnAuthenticationError(t *testing.T) {
 	}))
 
 	var attempts atomic.Int32
-	innerCall := weft.Arrow[string, string](func(_ context.Context, in string) (string, error) {
+	innerCall := func(_ context.Context, in string, _ oauth.TokenPair) (string, error) {
 		n := attempts.Add(1)
 		if n == 1 {
 			return "", oauth.AuthenticationError{Status: 401}
 		}
 		return "retry-success: " + in, nil
-	})
+	}
 	refresh := func(_ context.Context, _ oauth.TokenPair) (oauth.TokenPair, error) {
 		return oauth.TokenPair{AccessToken: "new", RefreshToken: "rt2", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
 
-	wrapped := oauth.WithRefresh(innerCall, refresh, store, id, "okta")
+	wrapped := oauth.WithRefresh[string, string](innerCall, refresh, store, id, "okta")
 	out, err := wrapped(context.Background(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "retry-success: hi", out)
 	require.EqualValues(t, 2, attempts.Load(), "should call once, then retry after refresh")
 
-	// New token in store.
 	got, _ := store.Get(context.Background(), id, "okta")
 	require.Equal(t, "new", got.AccessToken)
 }
@@ -144,13 +196,13 @@ func TestWithRefresh_NonAuthErrorDoesNotRetry(t *testing.T) {
 	require.NoError(t, store.Put(context.Background(), id, "okta", sampleTokens()))
 
 	var attempts atomic.Int32
-	innerCall := weft.Arrow[string, string](func(_ context.Context, _ string) (string, error) {
+	innerCall := func(_ context.Context, _ string, _ oauth.TokenPair) (string, error) {
 		attempts.Add(1)
 		return "", errors.New("500 internal")
-	})
+	}
 	refresh := makeFakeProvider("okta").Refresh
 
-	wrapped := oauth.WithRefresh(innerCall, refresh, store, id, "okta")
+	wrapped := oauth.WithRefresh[string, string](innerCall, refresh, store, id, "okta")
 	_, err := wrapped(context.Background(), "hi")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "500 internal")
@@ -163,17 +215,37 @@ func TestWithRefresh_RefreshFailurePropagates(t *testing.T) {
 	id := sampleIdentity()
 	require.NoError(t, store.Put(context.Background(), id, "okta", sampleTokens()))
 
-	innerCall := weft.Arrow[string, string](func(_ context.Context, _ string) (string, error) {
+	innerCall := func(_ context.Context, _ string, _ oauth.TokenPair) (string, error) {
 		return "", oauth.AuthenticationError{Status: 401}
-	})
+	}
 	refresh := func(_ context.Context, _ oauth.TokenPair) (oauth.TokenPair, error) {
 		return oauth.TokenPair{}, errors.New("refresh endpoint down")
 	}
 
-	wrapped := oauth.WithRefresh(innerCall, refresh, store, id, "okta")
+	wrapped := oauth.WithRefresh[string, string](innerCall, refresh, store, id, "okta")
 	_, err := wrapped(context.Background(), "hi")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "refresh endpoint down")
+}
+
+func TestWithRefresh_LoadTokensFailurePropagates(t *testing.T) {
+	// New behavior: WithRefresh now loads tokens at the start of every
+	// invocation. A missing token should surface clearly, not as a
+	// "no auth" 500 from the wrapped call.
+	store := oauth.NewMemoryTokenStore(oauth.NoOpCipher{})
+	defer store.Close()
+	id := sampleIdentity() // no token Put — store will return ErrTokenNotFound
+
+	innerCall := func(_ context.Context, _ string, _ oauth.TokenPair) (string, error) {
+		t.Fatal("inner call should not run when store load fails")
+		return "", nil
+	}
+	refresh := makeFakeProvider("okta").Refresh
+
+	wrapped := oauth.WithRefresh[string, string](innerCall, refresh, store, id, "okta")
+	_, err := wrapped(context.Background(), "hi")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "load tokens")
 }
 
 func TestWithRefresh_NilDependenciesPanic(t *testing.T) {

@@ -13,52 +13,49 @@ import (
 	"github.com/vinodhalaharvi/sibyl/auth/oauth"
 )
 
+// registerOAuthActivities registers the three activities the workflow
+// now depends on. (BuildAuthorizeURL and StoreStateMapping are gone —
+// they ran outside the workflow in earlier patches; they now run
+// synchronously in StartFlow.)
 func registerOAuthActivities(env *testsuite.TestWorkflowEnvironment, acts *oauth.Activities) {
-	env.RegisterActivityWithOptions(acts.BuildAuthorizeURL, activity.RegisterOptions{Name: oauth.BuildAuthorizeURLActivityName})
 	env.RegisterActivityWithOptions(acts.Exchange, activity.RegisterOptions{Name: oauth.ExchangeActivityName})
 	env.RegisterActivityWithOptions(acts.Whoami, activity.RegisterOptions{Name: oauth.WhoamiActivityName})
 	env.RegisterActivityWithOptions(acts.StoreTokens, activity.RegisterOptions{Name: oauth.StoreTokensActivityName})
-	env.RegisterActivityWithOptions(acts.StoreStateMapping, activity.RegisterOptions{Name: oauth.StoreStateMappingActivityName})
 }
 
 func TestOAuthFlowWorkflow_HappyPath(t *testing.T) {
-	// Set up provider, store, and activities.
 	reg := oauth.NewRegistry()
 	require.NoError(t, reg.Register(makeFakeProvider("test")))
 
 	store := oauth.NewMemoryTokenStore(oauth.NoOpCipher{})
 	defer store.Close()
 	mapper := oauth.NewMemoryStateMapper()
-
 	acts := oauth.NewActivities(reg, map[string]oauth.TokenStore{"default": store}, mapper, nil)
 
 	ts := &testsuite.WorkflowTestSuite{}
 	env := ts.NewTestWorkflowEnvironment()
 	registerOAuthActivities(env, acts)
 
-	// Schedule the callback signal to fire shortly after the workflow
-	// starts (after BuildAuthorizeURL completes and the state mapping
-	// has been recorded). The delayed callback polls the mapper until
-	// a state appears, then signals with that state.
+	// The workflow now expects State and CodeVerifier in its input —
+	// the caller (normally StartFlow) generates them synchronously
+	// before kicking off the workflow. Here we just supply known values.
+	knownState := "test-state-xyz"
+	knownVerifier := "test-verifier-abc"
+
+	// Schedule the callback signal shortly after the workflow starts.
+	// With the new shape, the workflow goes immediately to
+	// "awaiting_callback" — no preceding activities to wait on.
 	env.RegisterDelayedCallback(func() {
-		// Look up the most recent state by snapshotting the mapper.
-		// In a real flow the HTTP handler would do this lookup; here
-		// we just grab the one and only entry we expect to see.
-		snapshot := mapper.SnapshotForTests()
-		require.Len(t, snapshot, 1, "expected one state mapping by now")
-		var state string
-		for s := range snapshot {
-			state = s
-		}
 		env.SignalWorkflow(oauth.CallbackSignal, oauth.AuthCode{
 			Code:  "test-auth-code",
-			State: state,
+			State: knownState,
 		})
-	}, 100*time.Millisecond)
+	}, 50*time.Millisecond)
 
 	env.ExecuteWorkflow(oauth.OAuthFlowWorkflow, oauth.OAuthFlowInput{
 		Provider:        "test",
-		Scopes:          []string{"openid", "email"},
+		State:           knownState,
+		CodeVerifier:    knownVerifier,
 		RedirectURI:     "http://localhost:8090/cb",
 		StoreKey:        "default",
 		CallbackTimeout: 30 * time.Second,
@@ -86,10 +83,11 @@ func TestOAuthFlowWorkflow_CallbackTimeout(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	registerOAuthActivities(env, acts)
 
-	// Don't send any callback signal. Workflow should time out.
+	// No callback signal sent — should time out.
 	env.ExecuteWorkflow(oauth.OAuthFlowWorkflow, oauth.OAuthFlowInput{
 		Provider:        "test",
-		Scopes:          []string{"openid"},
+		State:           "s",
+		CodeVerifier:    "v",
 		RedirectURI:     "http://localhost/cb",
 		StoreKey:        "default",
 		CallbackTimeout: 500 * time.Millisecond,
@@ -115,16 +113,17 @@ func TestOAuthFlowWorkflow_StateMismatchRejected(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	registerOAuthActivities(env, acts)
 
-	// Send a callback with a wrong state — workflow should reject it.
 	env.RegisterDelayedCallback(func() {
+		// Signal with a state that doesn't match the workflow's expected state.
 		env.SignalWorkflow(oauth.CallbackSignal, oauth.AuthCode{
 			Code: "any-code", State: "wrong-state",
 		})
-	}, 100*time.Millisecond)
+	}, 50*time.Millisecond)
 
 	env.ExecuteWorkflow(oauth.OAuthFlowWorkflow, oauth.OAuthFlowInput{
 		Provider:        "test",
-		Scopes:          []string{"openid"},
+		State:           "expected-state",
+		CodeVerifier:    "v",
 		RedirectURI:     "http://localhost/cb",
 		StoreKey:        "default",
 		CallbackTimeout: 5 * time.Second,
@@ -135,7 +134,7 @@ func TestOAuthFlowWorkflow_StateMismatchRejected(t *testing.T) {
 	require.Contains(t, env.GetWorkflowError().Error(), "CSRFViolation")
 }
 
-func TestOAuthFlowWorkflow_MissingProviderInputFails(t *testing.T) {
+func TestOAuthFlowWorkflow_MissingRequiredInputFails(t *testing.T) {
 	reg := oauth.NewRegistry()
 	store := oauth.NewMemoryTokenStore(oauth.NoOpCipher{})
 	defer store.Close()
@@ -145,11 +144,15 @@ func TestOAuthFlowWorkflow_MissingProviderInputFails(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	registerOAuthActivities(env, acts)
 
-	env.ExecuteWorkflow(oauth.OAuthFlowWorkflow, oauth.OAuthFlowInput{})
+	// Missing State and CodeVerifier — should fail validation.
+	env.ExecuteWorkflow(oauth.OAuthFlowWorkflow, oauth.OAuthFlowInput{
+		Provider:    "test",
+		RedirectURI: "http://localhost/cb",
+		StoreKey:    "default",
+		// State and CodeVerifier intentionally empty
+	})
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.Error(t, env.GetWorkflowError())
 	require.Contains(t, env.GetWorkflowError().Error(), "InvalidInput")
 }
-
-// --- end of file ---

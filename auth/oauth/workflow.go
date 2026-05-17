@@ -39,27 +39,37 @@ import (
 const (
 	OAuthFlowWorkflowName = "OAuthFlowWorkflow"
 
-	BuildAuthorizeURLActivityName = "BuildAuthorizeURL"
-	ExchangeActivityName          = "OAuthExchange"
-	WhoamiActivityName            = "OAuthWhoami"
-	StoreTokensActivityName       = "OAuthStoreTokens"
-	StoreStateMappingActivityName = "OAuthStoreStateMapping"
+	ExchangeActivityName    = "OAuthExchange"
+	WhoamiActivityName      = "OAuthWhoami"
+	StoreTokensActivityName = "OAuthStoreTokens"
 
 	CallbackSignal = "oauth.callback"
 	StatusQuery    = "oauth.status"
 )
 
-// OAuthFlowInput is the workflow input. The store and provider are
-// resolved at the worker level from the WorkflowOptions registry —
-// workflows can only take serializable arguments.
+// OAuthFlowInput is the workflow input. The caller (typically via
+// StartFlow) prepares the State and CodeVerifier values synchronously
+// before kicking off the workflow.
+//
+// Note on sensitivity: CodeVerifier is embedded in workflow input,
+// which lands in Temporal's event history. It's a short-lived secret
+// (single-use during Exchange) — fine for the framework's default
+// threat model. For high-security deployments, use a Temporal data
+// converter to encrypt workflow payloads at rest.
 type OAuthFlowInput struct {
 	// Provider is the registered provider name ("okta", etc.).
 	Provider string
 
-	// Scopes is the OAuth scope list requested.
-	Scopes []string
+	// State is the CSRF token. The workflow verifies the callback's
+	// state matches this value before proceeding to Exchange.
+	State string
 
-	// RedirectURI is the callback URL the provider will redirect to.
+	// CodeVerifier is the PKCE verifier matching the challenge sent
+	// during authorize. Used during Exchange.
+	CodeVerifier string
+
+	// RedirectURI is the callback URL — provider re-validates this
+	// during Exchange, so it must match what was sent to authorize.
 	RedirectURI string
 
 	// StoreKey selects which TokenStore the worker should use.
@@ -82,13 +92,20 @@ type OAuthFlowStatus struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// OAuthFlowWorkflow runs an OAuth flow durably from authorize to session.
+// OAuthFlowWorkflow runs the durable portion of an OAuth flow: waiting
+// for the callback signal, exchanging the code for tokens, identifying
+// the user, and persisting the tokens.
+//
+// The synchronous prep (generating State/CodeVerifier, building the
+// authorize URL, recording the state→workflow-id mapping) happens
+// before this workflow starts — see StartFlow for the convenience
+// entry point that does all of that and kicks off this workflow.
 func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error) {
 	logger := workflow.GetLogger(ctx)
-	logger.Info("OAuthFlowWorkflow starting", "provider", in.Provider, "scopes", in.Scopes)
+	logger.Info("OAuthFlowWorkflow starting", "provider", in.Provider)
 
 	status := &OAuthFlowStatus{
-		Stage:     "preparing",
+		Stage:     "awaiting_callback",
 		StartedAt: workflow.Now(ctx),
 	}
 	if err := workflow.SetQueryHandler(ctx, StatusQuery, func() (OAuthFlowStatus, error) {
@@ -97,11 +114,11 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 		return Session{}, fmt.Errorf("oauth: set query handler: %w", err)
 	}
 
-	if in.Provider == "" || in.RedirectURI == "" || in.StoreKey == "" {
+	if in.Provider == "" || in.RedirectURI == "" || in.StoreKey == "" || in.State == "" || in.CodeVerifier == "" {
 		status.Stage = "failed"
 		status.Error = "missing required input"
 		return Session{}, temporal.NewNonRetryableApplicationError(
-			"OAuthFlowInput.Provider, RedirectURI, StoreKey are required",
+			"OAuthFlowInput requires Provider, RedirectURI, StoreKey, State, CodeVerifier",
 			"InvalidInput", nil)
 	}
 
@@ -110,49 +127,9 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 		callbackTimeout = 30 * time.Minute
 	}
 
-	// Activity options: short timeouts for the synchronous steps.
-	actCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 30 * time.Second,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:        time.Second,
-			BackoffCoefficient:     2.0,
-			MaximumAttempts:        3,
-			NonRetryableErrorTypes: []string{"InvalidInput", "ConfigurationError"},
-		},
-	})
-
-	// Step 1: build the authorize URL. The activity also generates
-	// fresh State and CodeVerifier values; we pull those back so we
-	// can verify the callback's state matches and use the verifier
-	// during exchange.
-	var redirect AuthorizeRedirect
-	if err := workflow.ExecuteActivity(actCtx, BuildAuthorizeURLActivityName, BuildAuthorizeURLInput{
-		Provider:    in.Provider,
-		Scopes:      in.Scopes,
-		RedirectURI: in.RedirectURI,
-	}).Get(ctx, &redirect); err != nil {
-		status.Stage = "failed"
-		status.Error = fmt.Sprintf("build authorize url: %v", err)
-		return Session{}, fmt.Errorf("oauth: build authorize url: %w", err)
-	}
-
-	// Step 2: record the state-to-workflow mapping so the HTTP callback
-	// handler can route the callback signal here.
-	if err := workflow.ExecuteActivity(actCtx, StoreStateMappingActivityName, StoreStateMappingInput{
-		State:      redirect.State,
-		WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID,
-	}).Get(ctx, nil); err != nil {
-		status.Stage = "failed"
-		status.Error = fmt.Sprintf("store state mapping: %v", err)
-		return Session{}, fmt.Errorf("oauth: store state mapping: %w", err)
-	}
-
-	status.Stage = "awaiting_callback"
-	status.AuthURL = redirect.URL
-
-	// Step 3: wait for the callback signal — possibly for a long time.
-	// Selector blocks durably; if the worker dies, on restart the
-	// workflow is rehydrated and waits again.
+	// Wait for the callback signal — possibly for a long time. The
+	// signal channel blocks durably; if the worker dies, on restart
+	// the workflow is rehydrated and waits again with no progress lost.
 	signalCh := workflow.GetSignalChannel(ctx, CallbackSignal)
 	var code AuthCode
 	receivedSignal := false
@@ -162,8 +139,6 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 		c.Receive(ctx, &code)
 		receivedSignal = true
 	})
-	// Use a timer for the timeout so we don't wait forever in case
-	// the user never completes the dance.
 	timerCtx, cancelTimer := workflow.WithCancel(ctx)
 	defer cancelTimer()
 	timerFuture := workflow.NewTimer(timerCtx, callbackTimeout)
@@ -178,8 +153,9 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 			"CallbackTimeout", nil)
 	}
 
-	// Step 4: verify state matches what we generated.
-	if code.State != redirect.State {
+	// Verify state matches what we generated. State mismatch is a CSRF
+	// signal — non-retryable, no second chances.
+	if code.State != in.State {
 		status.Stage = "failed"
 		status.Error = "state mismatch"
 		return Session{}, temporal.NewNonRetryableApplicationError(
@@ -189,7 +165,7 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 
 	status.Stage = "exchanging"
 
-	// Step 5: exchange the code for tokens.
+	// Activity options for the remaining HTTP-bound steps.
 	exchangeCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -200,11 +176,12 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 		},
 	})
 
+	// Exchange the code for tokens.
 	var tokens TokenPair
 	if err := workflow.ExecuteActivity(exchangeCtx, ExchangeActivityName, ExchangeActivityInput{
 		Provider:     in.Provider,
 		Code:         code,
-		CodeVerifier: redirect.CodeVerifier,
+		CodeVerifier: in.CodeVerifier,
 		RedirectURI:  in.RedirectURI,
 	}).Get(ctx, &tokens); err != nil {
 		status.Stage = "failed"
@@ -212,7 +189,7 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 		return Session{}, fmt.Errorf("oauth: exchange: %w", err)
 	}
 
-	// Step 6: identify the user.
+	// Identify the user.
 	var identity Identity
 	if err := workflow.ExecuteActivity(exchangeCtx, WhoamiActivityName, WhoamiActivityInput{
 		Provider: in.Provider,
@@ -223,7 +200,7 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 		return Session{}, fmt.Errorf("oauth: whoami: %w", err)
 	}
 
-	// Step 7: persist the tokens.
+	// Persist the tokens.
 	if err := workflow.ExecuteActivity(exchangeCtx, StoreTokensActivityName, StoreTokensActivityInput{
 		StoreKey: in.StoreKey,
 		Identity: identity,
@@ -246,17 +223,6 @@ func OAuthFlowWorkflow(ctx workflow.Context, in OAuthFlowInput) (Session, error)
 }
 
 // Activity input types.
-
-type BuildAuthorizeURLInput struct {
-	Provider    string
-	Scopes      []string
-	RedirectURI string
-}
-
-type StoreStateMappingInput struct {
-	State      string
-	WorkflowID string
-}
 
 type ExchangeActivityInput struct {
 	Provider     string
