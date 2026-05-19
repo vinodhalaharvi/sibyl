@@ -9,6 +9,7 @@
 //	GET  /events?workflow_id=X — SSE stream of all events for that workflow
 //	GET  /metrics          — Prometheus metrics
 //	GET  /healthz          — liveness check
+//	GET  /version          — build info (Go version, VCS revision, build time)
 //
 // Why co-located? The broker is in-process pub/sub. For the broker's
 // events to reach the HTTP handler, the worker that emits them must
@@ -31,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -136,6 +138,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/version", srv.handleVersion)
 
 	httpSrv := &http.Server{
 		Addr:              *addr,
@@ -191,6 +194,36 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(data)
+}
+
+// versionResponse is what GET /version returns.
+type versionResponse struct {
+	GoVersion string `json:"go_version"`
+	Revision  string `json:"revision,omitempty"`
+	Modified  bool   `json:"modified,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
+}
+
+// handleVersion returns build info embedded by the Go toolchain. Useful
+// for confirming which commit a running server was built from without
+// having to wire a separate -ldflags pipeline.
+func (s *server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	resp := versionResponse{}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		resp.GoVersion = info.GoVersion
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				resp.Revision = s.Value
+			case "vcs.modified":
+				resp.Modified = s.Value == "true"
+			case "vcs.time":
+				resp.BuildTime = s.Value
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // runRequest is the POST /run payload.
