@@ -36,9 +36,9 @@ import (
 // passing function pointers, so registration and invocation can be
 // decoupled (e.g. if you split workers).
 const (
-	ActivityPost          = "channels.Post"
-	ActivityAwaitVerdict  = "channels.AwaitVerdict"
-	ActivityAwaitReplies  = "channels.AwaitReplies"
+	ActivityPost         = "channels.Post"
+	ActivityAwaitVerdict = "channels.AwaitVerdict"
+	ActivityAwaitReplies = "channels.AwaitReplies"
 )
 
 // Activities is a Temporal-activity wrapper around a channels.Dispatcher.
