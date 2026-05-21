@@ -41,6 +41,9 @@ func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Opti
 	w.RegisterWorkflowWithOptions(agent.PRReviewWorkflow, workflow.RegisterOptions{
 		Name: agent.ReviewWorkflowName,
 	})
+	w.RegisterWorkflowWithOptions(agent.PlanWorkflow, workflow.RegisterOptions{
+		Name: agent.PlanWorkflowName,
+	})
 
 	acts := &agent.Activities{
 		Complete:    complete,
@@ -75,5 +78,11 @@ func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Opti
 	})
 	w.RegisterActivityWithOptions(acts.SynthesizeReview, activity.RegisterOptions{
 		Name: agent.SynthesizeReviewActivity,
+	})
+
+	// Generic plan activities. Echo is the no-vendor builtin the
+	// AgentScript translator targets first.
+	w.RegisterActivityWithOptions(agent.Echo, activity.RegisterOptions{
+		Name: agent.EchoActivityName,
 	})
 }
