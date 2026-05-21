@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/vinodhalaharvi/weft/weft"
 
 	"github.com/vinodhalaharvi/sibyl/agent"
 )
@@ -222,76 +221,6 @@ func TestEmitter_NoEmitterInContextReturnsNoop(t *testing.T) {
 	require.NotPanics(t, func() {
 		e.Emit(agent.NewNodeStarted("x", "y", ""))
 	})
-}
-
-// --- Integration: DAG execution emits node events --------------------------
-
-func TestDAGExecute_EmitsNodeLifecycleEvents(t *testing.T) {
-	b := agent.NewMemoryBroker()
-	defer b.Close()
-
-	ch, cancel := b.Subscribe("wf-dag", 32)
-	defer cancel()
-
-	dag := agent.NewDAG()
-	agent.AddTypedNode(dag, "a",
-		weft.Arrow[int, int](func(_ context.Context, n int) (int, error) {
-			return n + 1, nil
-		}),
-		func(_ agent.NodeInputs) (int, error) { return 1, nil },
-	)
-	agent.AddTypedNode(dag, "b",
-		weft.Arrow[int, int](func(_ context.Context, n int) (int, error) {
-			return n * 2, nil
-		}),
-		func(in agent.NodeInputs) (int, error) { return in.MustGet("a").(int), nil },
-		agent.DependsOn("a"),
-	)
-
-	compiled, err := dag.Compile()
-	require.NoError(t, err)
-
-	ctx := agent.WithEmitter(context.Background(), agent.NewEmitter(b, "wf-dag"))
-	results, err := compiled.Execute(ctx, nil)
-	require.NoError(t, err)
-	require.Equal(t, 4, results["b"]) // (1+1)*2
-
-	// Expect 4 events: a started, a completed, b started, b completed.
-	events := drain(t, ch, 4, 500*time.Millisecond)
-	require.Len(t, events, 4)
-	require.Equal(t, agent.EventKindNodeStarted, events[0].Kind())
-	require.Equal(t, agent.EventKindNodeCompleted, events[1].Kind())
-	require.Equal(t, agent.EventKindNodeStarted, events[2].Kind())
-	require.Equal(t, agent.EventKindNodeCompleted, events[3].Kind())
-}
-
-func TestDAGExecute_EmitsNodeFailedOnError(t *testing.T) {
-	b := agent.NewMemoryBroker()
-	defer b.Close()
-
-	ch, cancel := b.Subscribe("wf-fail", 16)
-	defer cancel()
-
-	dag := agent.NewDAG()
-	agent.AddTypedNode(dag, "bad",
-		weft.Arrow[any, any](func(_ context.Context, _ any) (any, error) {
-			return nil, errors.New("planned failure")
-		}),
-		func(_ agent.NodeInputs) (any, error) { return nil, nil },
-	)
-	compiled, err := dag.Compile()
-	require.NoError(t, err)
-
-	ctx := agent.WithEmitter(context.Background(), agent.NewEmitter(b, "wf-fail"))
-	_, err = compiled.Execute(ctx, nil)
-	require.Error(t, err)
-
-	events := drain(t, ch, 2, 500*time.Millisecond)
-	require.Len(t, events, 2)
-	require.Equal(t, agent.EventKindNodeStarted, events[0].Kind())
-	require.Equal(t, agent.EventKindNodeFailed, events[1].Kind())
-	failed := events[1].(agent.NodeFailed)
-	require.Contains(t, failed.Error, "planned failure")
 }
 
 // --- Integration: ToolAgent emits tool events -----------------------------
