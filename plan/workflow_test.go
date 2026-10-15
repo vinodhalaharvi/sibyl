@@ -1,4 +1,4 @@
-package agent_test
+package plan_test
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/vinodhalaharvi/sibyl/agent"
+	"github.com/vinodhalaharvi/sibyl/plan"
 )
 
 // registerEcho wires the Echo activity into a test environment under its
@@ -15,7 +15,7 @@ import (
 func registerEcho(env interface {
 	RegisterActivityWithOptions(any, activity.RegisterOptions)
 }) {
-	env.RegisterActivityWithOptions(agent.Echo, activity.RegisterOptions{Name: agent.EchoActivityName})
+	env.RegisterActivityWithOptions(plan.Echo, activity.RegisterOptions{Name: plan.EchoName})
 }
 
 func TestPlanWorkflow_SingleNode(t *testing.T) {
@@ -23,15 +23,15 @@ func TestPlanWorkflow_SingleNode(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	registerEcho(env)
 
-	plan := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: agent.EchoActivityName, Args: []string{"hello"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: plan.EchoName, Args: []string{"hello"}},
 	}}
 
-	env.ExecuteWorkflow(agent.PlanWorkflow, plan)
+	env.ExecuteWorkflow(plan.Workflow, p)
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 
-	var res agent.PlanResult
+	var res plan.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
 	require.Equal(t, "hello", res.Outputs["a"])
 	require.Equal(t, []string{"a"}, res.Leaves)
@@ -43,17 +43,17 @@ func TestPlanWorkflow_Pipeline(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	registerEcho(env)
 
-	plan := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: agent.EchoActivityName, Args: []string{"one"}},
-		{ID: "b", Activity: agent.EchoActivityName, Args: []string{"two"}, Requires: []agent.PlanNodeID{"a"}},
-		{ID: "c", Activity: agent.EchoActivityName, Requires: []agent.PlanNodeID{"b"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: plan.EchoName, Args: []string{"one"}},
+		{ID: "b", Activity: plan.EchoName, Args: []string{"two"}, Requires: []plan.NodeID{"a"}},
+		{ID: "c", Activity: plan.EchoName, Requires: []plan.NodeID{"b"}},
 	}}
 
-	env.ExecuteWorkflow(agent.PlanWorkflow, plan)
+	env.ExecuteWorkflow(plan.Workflow, p)
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 
-	var res agent.PlanResult
+	var res plan.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
 	require.Equal(t, "one", res.Outputs["a"])
 	// b sees a's output downstream: "two | one"
@@ -69,18 +69,18 @@ func TestPlanWorkflow_FanOutFanIn(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 	registerEcho(env)
 
-	plan := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: agent.EchoActivityName, Args: []string{"root"}},
-		{ID: "b", Activity: agent.EchoActivityName, Args: []string{"B"}, Requires: []agent.PlanNodeID{"a"}},
-		{ID: "c", Activity: agent.EchoActivityName, Args: []string{"C"}, Requires: []agent.PlanNodeID{"a"}},
-		{ID: "d", Activity: agent.EchoActivityName, Requires: []agent.PlanNodeID{"b", "c"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: plan.EchoName, Args: []string{"root"}},
+		{ID: "b", Activity: plan.EchoName, Args: []string{"B"}, Requires: []plan.NodeID{"a"}},
+		{ID: "c", Activity: plan.EchoName, Args: []string{"C"}, Requires: []plan.NodeID{"a"}},
+		{ID: "d", Activity: plan.EchoName, Requires: []plan.NodeID{"b", "c"}},
 	}}
 
-	env.ExecuteWorkflow(agent.PlanWorkflow, plan)
+	env.ExecuteWorkflow(plan.Workflow, p)
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 
-	var res agent.PlanResult
+	var res plan.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
 	require.Equal(t, "root", res.Outputs["a"])
 	require.Equal(t, "B | root", res.Outputs["b"])
@@ -96,12 +96,12 @@ func TestPlanWorkflow_RejectsInvalidPlan(t *testing.T) {
 	registerEcho(env)
 
 	// Cycle: a <-> b
-	plan := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: agent.EchoActivityName, Requires: []agent.PlanNodeID{"b"}},
-		{ID: "b", Activity: agent.EchoActivityName, Requires: []agent.PlanNodeID{"a"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: plan.EchoName, Requires: []plan.NodeID{"b"}},
+		{ID: "b", Activity: plan.EchoName, Requires: []plan.NodeID{"a"}},
 	}}
 
-	env.ExecuteWorkflow(agent.PlanWorkflow, plan)
+	env.ExecuteWorkflow(plan.Workflow, p)
 	require.True(t, env.IsWorkflowCompleted())
 	require.Error(t, env.GetWorkflowError())
 	require.Contains(t, env.GetWorkflowError().Error(), "InvalidPlan")

@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/vinodhalaharvi/sibyl/agent"
+	"github.com/vinodhalaharvi/sibyl/plan"
 	"github.com/vinodhalaharvi/weft/weft"
 )
 
@@ -40,9 +41,6 @@ func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Opti
 	})
 	w.RegisterWorkflowWithOptions(agent.PRReviewWorkflow, workflow.RegisterOptions{
 		Name: agent.ReviewWorkflowName,
-	})
-	w.RegisterWorkflowWithOptions(agent.PlanWorkflow, workflow.RegisterOptions{
-		Name: agent.PlanWorkflowName,
 	})
 
 	acts := &agent.Activities{
@@ -80,9 +78,7 @@ func RegisterWithOptions(w worker.Worker, complete agent.CompleteFunc, opts Opti
 		Name: agent.SynthesizeReviewActivity,
 	})
 
-	// Generic plan activities. Echo is the no-vendor builtin the
+	// The generic plan workflow and its no-vendor builtin, Echo, which the
 	// AgentScript translator targets first.
-	w.RegisterActivityWithOptions(agent.Echo, activity.RegisterOptions{
-		Name: agent.EchoActivityName,
-	})
+	plan.Register(w)
 }
