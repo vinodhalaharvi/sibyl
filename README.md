@@ -32,6 +32,9 @@ sibyl/
 │   ├── anthropic.go          Anthropic API client (CompleteFunc)
 │   ├── claudecode.go         Local Claude Code CLI client (CompleteFunc)
 │   └── *_test.go             unit tests (60 tests, in-process Temporal)
+├── plan/                     package plan — a serializable DAG of named activities
+│   ├── plan.go               Plan, Node, Options, Validate, Layers
+│   └── workflow.go           Workflow (runs any Plan), Echo, Register, Submit
 ├── worker/
 │   └── worker.go             Register() helper to wire Sibyl onto a Temporal worker
 ├── cmd/
@@ -241,6 +244,46 @@ The Critic returns structured JSON:
 If the model returns malformed JSON, the activity returns a non-retryable
 error (`InvalidLLMResponse`) — retrying won't help if it's a prompt/model
 problem, and we want to fail fast.
+
+## Plans: durable pipelines as data
+
+Package `plan` is a DAG whose nodes name registered activities, and the one
+workflow that runs any such DAG. It imports the Temporal SDK and nothing
+else (no LLM clients, Slack, metrics or cgo), so a program that needs
+durable, auditable pipelines and not agents can import it alone:
+
+```go
+import "github.com/vinodhalaharvi/sibyl/plan"
+
+p := plan.Plan{
+    Defaults: plan.Options{TaskQueue: "build"},
+    Nodes: []plan.Node{
+        {ID: "fetch", Activity: "Fetch", Args: []string{"bases/pi3"}},
+        {ID: "make", Activity: "Assemble", Requires: []plan.NodeID{"fetch"},
+            Options: plan.Options{Timeout: 10 * time.Minute, Heartbeat: 30 * time.Second}},
+        {ID: "boot", Activity: "BootTest", Requires: []plan.NodeID{"make"},
+            Options: plan.Options{TaskQueue: "lab", MaxAttempts: 1}},
+    },
+}
+
+plan.Register(w)                     // Workflow and Echo; your activities are yours to register
+run, err := plan.Submit(ctx, c, p, client.StartWorkflowOptions{
+    ID:                       requestHash,   // the same work...
+    WorkflowIDConflictPolicy: enums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, // ...runs once
+    TaskQueue:                "build",
+})
+```
+
+- **Options per node.** `TaskQueue` sends a node to the workers on that
+  queue (a build host, a lab bench); `Timeout`, `Heartbeat`, `MaxAttempts`
+  and `NonRetryable` set its retry policy. A node's options override the
+  plan's `Defaults`, which override `plan.DefaultOptions` (3 minutes, 3
+  attempts). `NonRetryable` is added to at each level, never replaced.
+- **Outputs stay small.** Every input and output is kept in the workflow's
+  history, so a node that makes something large stores it elsewhere and
+  returns where it put it.
+- The agent package's `Plan`, `PlanWorkflow`, `SubmitPlan`, `Echo` and
+  friends are aliases of these, so existing callers keep working.
 
 ## Testing strategy
 

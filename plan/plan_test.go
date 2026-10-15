@@ -1,4 +1,4 @@
-package agent_test
+package plan_test
 
 import (
 	"context"
@@ -6,23 +6,23 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/vinodhalaharvi/sibyl/agent"
+	"github.com/vinodhalaharvi/sibyl/plan"
 )
 
 func TestPlan_Validate_Empty(t *testing.T) {
-	require.Error(t, agent.Plan{}.Validate())
+	require.Error(t, plan.Plan{}.Validate())
 }
 
 func TestPlan_Validate_HappyPipeline(t *testing.T) {
-	p := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: agent.EchoActivityName, Args: []string{"hello"}},
-		{ID: "b", Activity: agent.EchoActivityName, Requires: []agent.PlanNodeID{"a"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: plan.EchoName, Args: []string{"hello"}},
+		{ID: "b", Activity: plan.EchoName, Requires: []plan.NodeID{"a"}},
 	}}
 	require.NoError(t, p.Validate())
 }
 
 func TestPlan_Validate_DuplicateID(t *testing.T) {
-	p := agent.Plan{Nodes: []agent.PlanNode{
+	p := plan.Plan{Nodes: []plan.Node{
 		{ID: "a", Activity: "Echo"},
 		{ID: "a", Activity: "Echo"},
 	}}
@@ -30,29 +30,29 @@ func TestPlan_Validate_DuplicateID(t *testing.T) {
 }
 
 func TestPlan_Validate_EmptyActivity(t *testing.T) {
-	p := agent.Plan{Nodes: []agent.PlanNode{{ID: "a"}}}
+	p := plan.Plan{Nodes: []plan.Node{{ID: "a"}}}
 	require.ErrorContains(t, p.Validate(), "no activity")
 }
 
 func TestPlan_Validate_UnknownRequire(t *testing.T) {
-	p := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: "Echo", Requires: []agent.PlanNodeID{"ghost"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: "Echo", Requires: []plan.NodeID{"ghost"}},
 	}}
 	require.ErrorContains(t, p.Validate(), "unknown node")
 }
 
 func TestPlan_Validate_SelfRequire(t *testing.T) {
-	p := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: "Echo", Requires: []agent.PlanNodeID{"a"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: "Echo", Requires: []plan.NodeID{"a"}},
 	}}
 	require.ErrorContains(t, p.Validate(), "requires itself")
 }
 
 func TestPlan_Validate_Cycle(t *testing.T) {
 	// a -> b -> a (each requires the other): no zero-indegree node.
-	p := agent.Plan{Nodes: []agent.PlanNode{
-		{ID: "a", Activity: "Echo", Requires: []agent.PlanNodeID{"b"}},
-		{ID: "b", Activity: "Echo", Requires: []agent.PlanNodeID{"a"}},
+	p := plan.Plan{Nodes: []plan.Node{
+		{ID: "a", Activity: "Echo", Requires: []plan.NodeID{"b"}},
+		{ID: "b", Activity: "Echo", Requires: []plan.NodeID{"a"}},
 	}}
 	require.ErrorContains(t, p.Validate(), "cycle")
 }
@@ -60,7 +60,7 @@ func TestPlan_Validate_Cycle(t *testing.T) {
 // === Echo activity (pure, no Temporal) ====================================
 
 func TestEcho_ArgsOnly(t *testing.T) {
-	out, err := agent.Echo(context.Background(), agent.NodeInput{
+	out, err := plan.Echo(context.Background(), plan.Input{
 		NodeID: "a", Args: []string{"hello", "world"},
 	})
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func TestEcho_ArgsOnly(t *testing.T) {
 }
 
 func TestEcho_UpstreamPassthrough(t *testing.T) {
-	out, err := agent.Echo(context.Background(), agent.NodeInput{
+	out, err := plan.Echo(context.Background(), plan.Input{
 		NodeID:   "b",
 		Upstream: map[string]string{"a": "from upstream"},
 	})
@@ -77,7 +77,7 @@ func TestEcho_UpstreamPassthrough(t *testing.T) {
 }
 
 func TestEcho_ArgsAndUpstream(t *testing.T) {
-	out, err := agent.Echo(context.Background(), agent.NodeInput{
+	out, err := plan.Echo(context.Background(), plan.Input{
 		NodeID:   "b",
 		Args:     []string{"stage2"},
 		Upstream: map[string]string{"a": "stage1out"},
@@ -87,7 +87,7 @@ func TestEcho_ArgsAndUpstream(t *testing.T) {
 }
 
 func TestEcho_MultipleUpstreamSortedJoin(t *testing.T) {
-	out, err := agent.Echo(context.Background(), agent.NodeInput{
+	out, err := plan.Echo(context.Background(), plan.Input{
 		NodeID:   "join",
 		Upstream: map[string]string{"z": "Z", "a": "A", "m": "M"},
 	})
@@ -97,7 +97,7 @@ func TestEcho_MultipleUpstreamSortedJoin(t *testing.T) {
 }
 
 func TestEcho_Empty(t *testing.T) {
-	out, err := agent.Echo(context.Background(), agent.NodeInput{NodeID: "a"})
+	out, err := plan.Echo(context.Background(), plan.Input{NodeID: "a"})
 	require.NoError(t, err)
 	require.Equal(t, "", out)
 }
